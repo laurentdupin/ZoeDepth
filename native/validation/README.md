@@ -143,3 +143,30 @@ On the Radeon RX 9070, the N 64x64 fixture improved from a `76.0 ms`
 steady-state median to `63.8-66.1 ms` across three 21-iteration runs
 (`13-16%`). All 18 variant/size/adapter correctness canaries retained the
 results above.
+
+## Embedded InferBridge harness
+
+The native DLL exports `ibrh_get_api` for InferBridge harness ABI 1.0. The
+single ZoeDepth catalog entry selects `ZoeN`, `ZoeK`, or `ZoeNK` through the
+existing `Models` parameter and selects a multiple-of-32 network size through
+`Size`. `model_path` remains the hidden content-addressed `.zoe` derivation
+of the canonical checkpoint selected for that variant; it is not a duplicate
+model card or canonical download.
+
+The harness accepts one host-memory BGRA8 capture, executes the complete image
+and metric graph, then reproduces the Python worker's final
+min/max-to-255 normalization, inversion, and truncating uint8 conversion. It
+returns a leased source-size `DEPTH_UNORM8` image and preserves
+`source_frame_id` and timestamp. An acquired output remains valid after its
+job handle is released.
+
+Capability reporting advertises only host input/output and one synchronous
+in-flight job. The selected Vulkan device executes the full graph; image
+upload and metric-depth download remain host boundaries. External GPU
+resources, asynchronous completion, and cancellation are not advertised.
+
+The Windows Release ABI and full-graph harness tests pass for all three
+derived ZoeN/ZoeK/ZoeNK models on the RX 9070. The deployed ZoeN 53x41,
+size-64 uint8 output was also compared against Python CPU on every GPU:
+maximum pixel deviation was one 8-bit level on all three adapters. The
+underlying 18 variant/size/adapter metric gates remain as reported above.

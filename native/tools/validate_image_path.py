@@ -79,6 +79,17 @@ def main() -> None:
 
     difference = np.abs(actual - reference)
     relative = difference / np.maximum(np.abs(reference), 1e-6)
+    def worker_output(depth: np.ndarray) -> np.ndarray:
+        normalized = (
+            (depth - depth.min()) /
+            (depth.max() - depth.min()) * np.float32(255.0)
+        )
+        return (np.float32(255.0) - normalized).astype(np.uint8)
+
+    reference_u8 = worker_output(reference)
+    actual_u8 = worker_output(actual)
+    uint8_difference = np.abs(
+        actual_u8.astype(np.int16) - reference_u8.astype(np.int16))
     report = {
         "shape": list(reference.shape),
         "reference_minimum": float(reference.min()),
@@ -87,9 +98,18 @@ def main() -> None:
         "mean_absolute_error": float(difference.mean()),
         "maximum_relative_error": float(relative.max()),
         "mean_relative_error": float(relative.mean()),
+        "maximum_worker_uint8_error": int(uint8_difference.max()),
+        "mean_worker_uint8_error": float(uint8_difference.mean()),
+        "worker_uint8_mismatch_fraction": float(
+            np.count_nonzero(uint8_difference) /
+            uint8_difference.size),
     }
     print(json.dumps(report, indent=2))
-    if not np.isfinite(actual).all() or relative.mean() > 0.02:
+    if (
+        not np.isfinite(actual).all() or
+        relative.mean() > 0.02 or
+        uint8_difference.max() > 2
+    ):
         raise SystemExit("native image-path accuracy gate failed")
 
 

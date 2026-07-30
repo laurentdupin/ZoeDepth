@@ -74,7 +74,9 @@ add_library(zoedepth_core STATIC
     src/graph_cpu.cpp)
 target_include_directories(zoedepth_core PUBLIC src)
 
-add_library(zoedepth_model SHARED src/zoedepth.cpp)
+add_library(zoedepth_model SHARED
+    src/zoedepth.cpp
+    src/inferbridge_harness.cpp)
 if(ZOEDEPTH_WITH_VULKAN)
     target_sources(zoedepth_model PRIVATE
         src/vulkan.cpp src/operators.cpp src/gpu_model.cpp
@@ -90,7 +92,9 @@ target_include_directories(
     zoedepth_model PUBLIC include PRIVATE src)
 target_link_libraries(zoedepth_model PRIVATE zoedepth_core)
 target_compile_definitions(
-    zoedepth_model PRIVATE ZOEDEPTH_BUILD_DLL)
+    zoedepth_model PRIVATE
+        ZOEDEPTH_BUILD_DLL
+        INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
 set_target_properties(
     zoedepth_model PROPERTIES OUTPUT_NAME zoedepth_native)
 
@@ -129,6 +133,26 @@ if(BUILD_TESTING)
     add_test(
         NAME zoedepth_c_abi_smoke
         COMMAND zoedepth_c_abi_smoke)
+    add_executable(
+        zoedepth_harness_abi_smoke tests/harness_abi_smoke.c)
+    target_link_libraries(
+        zoedepth_harness_abi_smoke PRIVATE zoedepth_model)
+    target_include_directories(
+        zoedepth_harness_abi_smoke PRIVATE include)
+    add_test(
+        NAME zoedepth_harness_abi_smoke
+        COMMAND zoedepth_harness_abi_smoke)
+    add_executable(
+        zoedepth_harness_full_graph tests/harness_full_graph.cpp)
+    target_link_libraries(
+        zoedepth_harness_full_graph PRIVATE zoedepth_model)
+    target_include_directories(
+        zoedepth_harness_full_graph PRIVATE include)
+    add_test(
+        NAME zoedepth_harness_full_graph
+        COMMAND zoedepth_harness_full_graph)
+    set_tests_properties(
+        zoedepth_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
     if(ZOEDEPTH_WITH_VULKAN)
         add_executable(
             zoedepth_gpu_encoder_probe
