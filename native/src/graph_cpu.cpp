@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -250,6 +251,13 @@ void relu(Image& image) {
     }
 }
 
+void softplus(Image& image) {
+    for (float& value : image.values) {
+        value = std::log1p(std::exp(-std::abs(value))) +
+            std::max(value, 0.0f);
+    }
+}
+
 Image add(Image left, const Image& right) {
     if (left.channels != right.channels ||
         left.height != right.height ||
@@ -262,6 +270,41 @@ Image add(Image left, const Image& right) {
         left.values[index] += right.values[index];
     }
     return left;
+}
+
+Image concatenate(
+    const Image& first,
+    const Image& second) {
+    if (first.height != second.height ||
+        first.width != second.width) {
+        throw std::runtime_error(
+            "ZoeDepth concatenation shape mismatch");
+    }
+    Image output{
+        first.channels + second.channels,
+        first.height, first.width, {}};
+    output.values.reserve(
+        first.values.size() + second.values.size());
+    output.values.insert(
+        output.values.end(),
+        first.values.begin(), first.values.end());
+    output.values.insert(
+        output.values.end(),
+        second.values.begin(), second.values.end());
+    return output;
+}
+
+Image projector(
+    const ModelFile& model,
+    const Image& input,
+    const std::string& base) {
+    Image output = conv2d(
+        model, input, base + ".0.weight",
+        base + ".0.bias", 1, 0);
+    relu(output);
+    return conv2d(
+        model, output, base + ".2.weight",
+        base + ".2.bias", 1, 0);
 }
 
 Image residual_unit(
@@ -437,5 +480,187 @@ DecoderOutput midas_decoder_cpu(
     return output;
 }
 
-}  // namespace zoe_native
+Image metric_depth_cpu(
+    const ModelFile& model,
+    DecoderOutput&& decoded) {
+    if (decoded.bottleneck.channels != 256 ||
+        decoded.out_conv.channels != 32 ||
+        decoded.relative_depth.channels != 1 ||
+        decoded.refinement_blocks.size() != 4) {
+        throw std::invalid_argument(
+            "invalid ZoeDepth decoder output");
+    }
+    Image bottleneck = conv2d(
+        model, decoded.bottleneck,
+        "conv2.weight", "conv2.bias", 1, 0);
 
+    Image b_previous = conv2d(
+        model, bottleneck,
+        "seed_bin_regressor._net.0.weight",
+        "seed_bin_regressor._net.0.bias", 1, 0);
+    relu(b_previous);
+    b_previous = conv2d(
+        model, b_previous,
+        "seed_bin_regressor._net.2.weight",
+        "seed_bin_regressor._net.2.bias", 1, 0);
+    softplus(b_previous);
+    Image previous_embedding = projector(
+        model, bottleneck, "seed_projector._net");
+
+    Image centers;
+    Image embedding;
+    const std::uint32_t attractor_counts[4] = {16, 8, 4, 1};
+    for (std::uint32_t level = 0; level < 4; ++level) {
+        embedding = projector(
+            model, decoded.refinement_blocks[level],
+            "projectors." + std::to_string(level) + "._net");
+        Image previous_embedding_resized = resize_align_corners(
+            previous_embedding, embedding.height, embedding.width);
+        Image attractor_input = add(
+            embedding, previous_embedding_resized);
+        Image attractors = conv2d(
+            model, attractor_input,
+            "attractors." + std::to_string(level) +
+                "._net.0.weight",
+            "attractors." + std::to_string(level) +
+                "._net.0.bias",
+            1, 0);
+        relu(attractors);
+        attractors = conv2d(
+            model, attractors,
+            "attractors." + std::to_string(level) +
+                "._net.2.weight",
+            "attractors." + std::to_string(level) +
+                "._net.2.bias",
+            1, 0);
+        softplus(attractors);
+        if (attractors.channels != attractor_counts[level]) {
+            throw std::runtime_error(
+                "unexpected ZoeDepth attractor count");
+        }
+        b_previous = resize_align_corners(
+            b_previous, embedding.height, embedding.width);
+        centers = b_previous;
+        const std::uint64_t pixels =
+            std::uint64_t(embedding.height) * embedding.width;
+        for (std::uint32_t bin = 0;
+             bin < centers.channels; ++bin) {
+            for (std::uint64_t pixel = 0;
+                 pixel < pixels; ++pixel) {
+                const float center =
+                    b_previous.values[
+                        std::uint64_t(bin) * pixels + pixel];
+                float delta = 0.0f;
+                for (std::uint32_t attractor = 0;
+                     attractor < attractors.channels;
+                     ++attractor) {
+                    const float difference =
+                        attractors.values[
+                            std::uint64_t(attractor) * pixels +
+                            pixel] -
+                        center;
+                    delta += difference /
+                        (1.0f + 1000.0f *
+                            difference * difference);
+                }
+                centers.values[
+                    std::uint64_t(bin) * pixels + pixel] =
+                    center + delta /
+                        static_cast<float>(attractors.channels);
+            }
+        }
+        b_previous = centers;
+        previous_embedding = embedding;
+    }
+
+    Image relative = resize_align_corners(
+        decoded.relative_depth,
+        decoded.out_conv.height,
+        decoded.out_conv.width);
+    Image last = concatenate(decoded.out_conv, relative);
+    embedding = resize_align_corners(
+        embedding, last.height, last.width);
+    Image probability_parameters = concatenate(last, embedding);
+    probability_parameters = conv2d(
+        model, probability_parameters,
+        "conditional_log_binomial.mlp.0.weight",
+        "conditional_log_binomial.mlp.0.bias", 1, 0);
+    for (float& value : probability_parameters.values) {
+        value = gelu(value);
+    }
+    probability_parameters = conv2d(
+        model, probability_parameters,
+        "conditional_log_binomial.mlp.2.weight",
+        "conditional_log_binomial.mlp.2.bias", 1, 0);
+    softplus(probability_parameters);
+    if (probability_parameters.channels != 4 ||
+        centers.channels != 64) {
+        throw std::runtime_error(
+            "unexpected ZoeDepth distribution shape");
+    }
+    centers = resize_align_corners(
+        centers, last.height, last.width);
+    const std::uint64_t pixels =
+        std::uint64_t(last.height) * last.width;
+    Image depth{1, last.height, last.width, {}};
+    depth.values.resize(static_cast<std::size_t>(pixels));
+    std::vector<float> logits(64);
+    constexpr float epsilon = 1.0e-4f;
+    constexpr float log_epsilon = 1.0e-7f;
+    for (std::uint64_t pixel = 0; pixel < pixels; ++pixel) {
+        const float p0 =
+            probability_parameters.values[pixel] + epsilon;
+        const float p1 =
+            probability_parameters.values[pixels + pixel] + epsilon;
+        const float probability = p0 / (p0 + p1);
+        const float t0 =
+            probability_parameters.values[2 * pixels + pixel] +
+            epsilon;
+        const float t1 =
+            probability_parameters.values[3 * pixels + pixel] +
+            epsilon;
+        const float temperature =
+            (50.0f - 0.0212f) * (t0 / (t0 + t1)) +
+            0.0212f;
+        const float n = 63.0f + log_epsilon;
+        float maximum = -std::numeric_limits<float>::infinity();
+        for (std::uint32_t bin = 0; bin < 64; ++bin) {
+            const float k =
+                static_cast<float>(bin) + log_epsilon;
+            const float n_minus_k = n - k;
+            const float log_combination =
+                n * std::log(n) -
+                k * std::log(k) -
+                n_minus_k *
+                    std::log(n_minus_k + log_epsilon);
+            const float one_minus_probability =
+                std::clamp(
+                    1.0f - probability, epsilon, 1.0f);
+            const float clamped_probability =
+                std::clamp(probability, epsilon, 1.0f);
+            logits[bin] = (
+                log_combination +
+                k * std::log(clamped_probability) +
+                (64.0f - 1.0f - k) *
+                    std::log(one_minus_probability)) /
+                temperature;
+            maximum = std::max(maximum, logits[bin]);
+        }
+        float denominator = 0.0f;
+        for (float& logit : logits) {
+            logit = std::exp(logit - maximum);
+            denominator += logit;
+        }
+        float value = 0.0f;
+        for (std::uint32_t bin = 0; bin < 64; ++bin) {
+            value +=
+                (logits[bin] / denominator) *
+                centers.values[
+                    std::uint64_t(bin) * pixels + pixel];
+        }
+        depth.values[pixel] = value;
+    }
+    return depth;
+}
+
+}  // namespace zoe_native

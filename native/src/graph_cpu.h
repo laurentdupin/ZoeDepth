@@ -26,5 +26,8 @@ DecoderOutput midas_decoder_cpu(
     const ModelFile& model,
     EncoderOutput&& encoded);
 
-}  // namespace zoe_native
+Image metric_depth_cpu(
+    const ModelFile& model,
+    DecoderOutput&& decoded);
 
+}  // namespace zoe_native

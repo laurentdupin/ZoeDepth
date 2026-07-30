@@ -54,4 +54,19 @@ fusion stages, and the relative-depth head. At 32x32, the decoder taps have
 relative L1 between `9.84871e-7` and `2.73322e-6`; the largest absolute
 difference is `0.0644531` on an activation range reaching `25,683.7`.
 
-The Zoe metric-bin head remains pending.
+## Full ZoeD-M12-N graph
+
+The metric path includes the bottleneck projection, unbounded seed bins, four
+projector/attractor stages, conditional log-binomial distribution, and
+metric-depth expectation. The exported dependency-free DLL accepts planar
+RGB FP32 in `[0,1]` and returns same-size metric depth.
+
+| Input | Relative L1 | Maximum absolute error |
+|---:|---:|---:|
+| 32x32 | `0.00287806` (`0.287806%`) | `0.00276148` |
+| 64x64 | `0.00308457` (`0.308457%`) | `0.00428212` |
+
+These differences are accumulated FP32 execution-order drift and remain within
+the required 1% bound. The current code is a scalar CPU correctness oracle.
+ZoeD-K, ZoeD-NK, Vulkan, image preprocessing/resizing, and zero-copy GPU
+resources remain pending and are not advertised.

@@ -32,7 +32,9 @@ def main() -> None:
         lambda _module, _input, output:
         relative.__setitem__("depth", output.detach().cpu()))
     with torch.inference_mode():
-        depth = model(rgb)["metric_depth"].cpu()
+        outputs = model(
+            rgb, return_final_centers=True, return_probs=True)
+        depth = outputs["metric_depth"].cpu()
     handle.remove()
 
     prefix = args.output_prefix
@@ -43,6 +45,10 @@ def main() -> None:
         prefix.with_suffix(".relative.bin"))
     depth.numpy().astype(np.float32).tofile(
         prefix.with_suffix(".depth.bin"))
+    outputs["bin_centers"].cpu().numpy().astype(np.float32).tofile(
+        prefix.with_suffix(".centers.bin"))
+    outputs["probs"].cpu().numpy().astype(np.float32).tofile(
+        prefix.with_suffix(".probs.bin"))
     names = ("out_conv", "l4_rn", "r4", "r3", "r2", "r1")
     report = {
         "rgb_shape": list(rgb.shape),
