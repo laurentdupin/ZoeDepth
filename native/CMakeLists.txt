@@ -12,7 +12,8 @@ endif()
 
 add_library(zoedepth_model STATIC
     src/model.cpp
-    src/encoder_cpu.cpp)
+    src/encoder_cpu.cpp
+    src/graph_cpu.cpp)
 target_include_directories(zoedepth_model PUBLIC src)
 
 add_executable(
@@ -25,6 +26,11 @@ add_executable(
 target_link_libraries(
     zoedepth_encoder_probe PRIVATE zoedepth_model)
 
+add_executable(
+    zoedepth_decoder_probe tools/decoder_probe.cpp)
+target_link_libraries(
+    zoedepth_decoder_probe PRIVATE zoedepth_model)
+
 if(MSVC)
     target_compile_options(
         zoedepth_model PRIVATE /W4 /permissive-)
@@ -32,6 +38,8 @@ if(MSVC)
         zoedepth_model_probe PRIVATE /W4 /permissive-)
     target_compile_options(
         zoedepth_encoder_probe PRIVATE /W4 /permissive-)
+    target_compile_options(
+        zoedepth_decoder_probe PRIVATE /W4 /permissive-)
 else()
     target_compile_options(
         zoedepth_model PRIVATE -Wall -Wextra -Wpedantic)
@@ -39,4 +47,6 @@ else()
         zoedepth_model_probe PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(
         zoedepth_encoder_probe PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(
+        zoedepth_decoder_probe PRIVATE -Wall -Wextra -Wpedantic)
 endif()

@@ -46,4 +46,12 @@ four MiDaS feature taps:
 | 17 | `1.78015e-6` (`0.000178%`) | `0.000343323` |
 | 23 | `3.99074e-6` (`0.000399%`) | `0.00128174` |
 
-The MiDaS decoder and Zoe metric-bin head remain pending.
+## MiDaS decoder gate
+
+The native graph now includes readout projection, multi-scale token
+reassembly, transpose/stride resizing, scratch projections, all four feature
+fusion stages, and the relative-depth head. At 32x32, the decoder taps have
+relative L1 between `9.84871e-7` and `2.73322e-6`; the largest absolute
+difference is `0.0644531` on an activation range reaching `25,683.7`.
+
+The Zoe metric-bin head remains pending.
