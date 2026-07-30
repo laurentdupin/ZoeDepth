@@ -40,6 +40,18 @@
 #include "posterior_sample_spv.h"
 #include "scale_values_spv.h"
 #include "depth_output_spv.h"
+#include "prepare_beit_spv.h"
+#include "qv_bias_spv.h"
+#include "relative_bias_spv.h"
+#include "readout_concat_spv.h"
+#include "tokens_to_nchw_plain_spv.h"
+#include "softplus_spv.h"
+#include "router_tokens_spv.h"
+#include "qkv_split_spv.h"
+#include "seed_centers_spv.h"
+#include "attractor_activate_spv.h"
+#include "attractor_update_spv.h"
+#include "distribution_depth_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -220,7 +232,35 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       scale_values_(context.create_pipeline(
           zoe_scale_values_spv, zoe_scale_values_spv_size, 1, 8)),
       depth_output_(context.create_pipeline(
-          zoe_depth_output_spv, zoe_depth_output_spv_size, 2, 16)) {
+          zoe_depth_output_spv, zoe_depth_output_spv_size, 2, 16)),
+      prepare_beit_(context.create_pipeline(
+          zoe_prepare_beit_spv, zoe_prepare_beit_spv_size, 5, 16)),
+      qv_bias_(context.create_pipeline(
+          zoe_qv_bias_spv, zoe_qv_bias_spv_size, 3, 8)),
+      relative_bias_(context.create_pipeline(
+          zoe_relative_bias_spv, zoe_relative_bias_spv_size, 2, 16)),
+      readout_concat_(context.create_pipeline(
+          zoe_readout_concat_spv, zoe_readout_concat_spv_size, 2, 8)),
+      tokens_to_nchw_plain_(context.create_pipeline(
+          zoe_tokens_to_nchw_plain_spv,
+          zoe_tokens_to_nchw_plain_spv_size, 2, 8)),
+      softplus_(context.create_pipeline(
+          zoe_softplus_spv, zoe_softplus_spv_size, 1, 4)),
+      router_tokens_(context.create_pipeline(
+          zoe_router_tokens_spv, zoe_router_tokens_spv_size, 2, 8)),
+      qkv_split_(context.create_pipeline(
+          zoe_qkv_split_spv, zoe_qkv_split_spv_size, 4, 8)),
+      seed_centers_(context.create_pipeline(
+          zoe_seed_centers_spv, zoe_seed_centers_spv_size, 2, 8)),
+      attractor_activate_(context.create_pipeline(
+          zoe_attractor_activate_spv,
+          zoe_attractor_activate_spv_size, 1, 4)),
+      attractor_update_(context.create_pipeline(
+          zoe_attractor_update_spv,
+          zoe_attractor_update_spv_size, 4, 16)),
+      distribution_depth_(context.create_pipeline(
+          zoe_distribution_depth_spv,
+          zoe_distribution_depth_spv_size, 3, 4)) {
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -1167,6 +1207,203 @@ void VulkanOperators::depth_output(
     context_.dispatch(
         depth_output_, {&output, &decoded}, &parameters, sizeof(parameters),
         divide_up(target_width * target_height, 256));
+}
+
+void VulkanOperators::prepare_beit(
+    VulkanBuffer& output, const VulkanBuffer& image,
+    const VulkanBuffer& weight, const VulkanBuffer& bias,
+    const VulkanBuffer& class_token,
+    std::uint32_t width, std::uint32_t height) {
+    if (width == 0 || height == 0 ||
+        width % 16 != 0 || height % 16 != 0) {
+        throw std::invalid_argument("invalid BEiT image dimensions");
+    }
+    const std::uint32_t patch_width = width / 16;
+    const std::uint32_t patch_height = height / 16;
+    const std::uint32_t tokens = patch_width * patch_height + 1;
+    require_bytes(image, std::uint64_t(3) * width * height, "BEiT image");
+    require_bytes(weight, std::uint64_t(1024) * 3 * 16 * 16, "BEiT weight");
+    require_bytes(bias, 1024, "BEiT bias");
+    require_bytes(class_token, 1024, "BEiT class token");
+    require_bytes(output, std::uint64_t(tokens) * 1024, "BEiT output");
+    const std::uint32_t parameters[4] = {
+        width, height, patch_width, patch_height};
+    context_.dispatch(
+        prepare_beit_, {&output, &image, &weight, &bias, &class_token},
+        parameters, sizeof(parameters), 128, divide_up(tokens, 8));
+}
+
+void VulkanOperators::qv_bias(
+    VulkanBuffer& qkv, const VulkanBuffer& q_bias,
+    const VulkanBuffer& v_bias,
+    std::uint32_t tokens, std::uint32_t embedding) {
+    require_bytes(qkv, std::uint64_t(tokens) * embedding * 3, "QKV");
+    require_bytes(q_bias, embedding, "query bias");
+    require_bytes(v_bias, embedding, "value bias");
+    const std::uint32_t parameters[2] = {tokens, embedding};
+    context_.dispatch(
+        qv_bias_, {&qkv, &q_bias, &v_bias},
+        parameters, sizeof(parameters),
+        divide_up(tokens * embedding, 256));
+}
+
+void VulkanOperators::attention_head64_relative(
+    VulkanBuffer& output, const VulkanBuffer& qkv,
+    const VulkanBuffer& table, VulkanBuffer& scores,
+    std::uint32_t patch_width, std::uint32_t patch_height,
+    std::uint32_t heads) {
+    const std::uint32_t tokens =
+        patch_width * patch_height + 1;
+    require_bytes(output, std::uint64_t(tokens) * heads * 64, "attention");
+    require_bytes(qkv, std::uint64_t(tokens) * heads * 64 * 3, "QKV");
+    require_bytes(scores, std::uint64_t(heads) * tokens * tokens, "scores");
+    require_bytes(table, std::uint64_t(2212) * heads, "relative table");
+    struct BmmParameters {
+        std::uint32_t rows, columns, inner, batches;
+        std::uint32_t weight_transposed, output_token_major;
+        std::uint32_t qkv_embedding, input_qkv_query;
+        std::uint32_t weight_qkv_kind, qkv_heads, qkv_tokens;
+    } score{
+        tokens, tokens, 64, heads, 0, 0, heads * 64,
+        1, 1, heads, tokens};
+    context_.dispatch(
+        bmm_, {&scores, &qkv, &qkv}, &score, sizeof(score),
+        divide_up(divide_up(tokens, 4), 8),
+        divide_up(divide_up(tokens, 8), 8), heads);
+    const std::uint32_t bias_parameters[4] = {
+        patch_width, patch_height, tokens, heads};
+    context_.dispatch(
+        relative_bias_, {&scores, &table},
+        bias_parameters, sizeof(bias_parameters),
+        divide_up(heads * tokens * tokens, 256));
+    const std::uint32_t softmax[2] = {heads * tokens, tokens};
+    context_.dispatch(
+        softmax_lastdim_, {&scores, &scores},
+        softmax, sizeof(softmax), softmax[0]);
+    BmmParameters values{
+        tokens, 64, tokens, heads, 0, 1, heads * 64,
+        0, 2, heads, tokens};
+    context_.dispatch(
+        bmm_, {&output, &scores, &qkv}, &values, sizeof(values),
+        divide_up(divide_up(64, 4), 8),
+        divide_up(divide_up(tokens, 8), 8), heads);
+}
+
+void VulkanOperators::readout_concat(
+    VulkanBuffer& output, const VulkanBuffer& tokens,
+    std::uint32_t patches, std::uint32_t embedding) {
+    require_bytes(tokens, std::uint64_t(patches + 1) * embedding, "tokens");
+    require_bytes(output, std::uint64_t(patches) * embedding * 2, "readout");
+    const std::uint32_t parameters[2] = {patches, embedding};
+    context_.dispatch(
+        readout_concat_, {&output, &tokens},
+        parameters, sizeof(parameters),
+        divide_up(patches * embedding * 2, 256));
+}
+
+void VulkanOperators::tokens_to_nchw_plain(
+    VulkanBuffer& output, const VulkanBuffer& tokens,
+    std::uint32_t token_count, std::uint32_t channels) {
+    require_bytes(tokens, std::uint64_t(token_count) * channels, "tokens");
+    require_bytes(output, std::uint64_t(token_count) * channels, "NCHW");
+    const std::uint32_t parameters[2] = {token_count, channels};
+    context_.dispatch(
+        tokens_to_nchw_plain_, {&output, &tokens},
+        parameters, sizeof(parameters),
+        divide_up(token_count * channels, 256));
+}
+
+void VulkanOperators::softplus(
+    VulkanBuffer& values, std::uint32_t count) {
+    require_bytes(values, count, "softplus");
+    context_.dispatch(
+        softplus_, {&values}, &count, sizeof(count), divide_up(count, 256));
+}
+
+void VulkanOperators::gelu_values(
+    VulkanBuffer& values, std::uint32_t count) {
+    require_bytes(values, count, "GELU");
+    context_.dispatch(
+        gelu_, {&values, &values}, &count, sizeof(count),
+        divide_up(count, 256));
+}
+
+void VulkanOperators::router_tokens(
+    VulkanBuffer& output, const VulkanBuffer& embedded,
+    std::uint32_t spatial, std::uint32_t features) {
+    require_bytes(embedded, std::uint64_t(spatial) * features, "router image");
+    require_bytes(output, std::uint64_t(spatial + 1) * features, "router tokens");
+    const std::uint32_t parameters[2] = {spatial, features};
+    context_.dispatch(
+        router_tokens_, {&output, &embedded},
+        parameters, sizeof(parameters),
+        divide_up((spatial + 1) * features, 256));
+}
+
+void VulkanOperators::qkv_split(
+    VulkanBuffer& query, VulkanBuffer& key, VulkanBuffer& value_buffer,
+    const VulkanBuffer& qkv,
+    std::uint32_t tokens, std::uint32_t dimensions) {
+    const std::uint64_t count = std::uint64_t(tokens) * dimensions;
+    require_bytes(qkv, count * 3, "QKV");
+    require_bytes(query, count, "query");
+    require_bytes(key, count, "key");
+    require_bytes(value_buffer, count, "value");
+    const std::uint32_t parameters[2] = {tokens, dimensions};
+    context_.dispatch(
+        qkv_split_, {&query, &key, &value_buffer, &qkv},
+        parameters, sizeof(parameters),
+        divide_up(static_cast<std::uint32_t>(count), 256));
+}
+
+void VulkanOperators::seed_centers(
+    VulkanBuffer& output, const VulkanBuffer& input,
+    std::uint32_t pixels, std::uint32_t bins) {
+    require_bytes(input, std::uint64_t(pixels) * bins, "seed input");
+    require_bytes(output, std::uint64_t(pixels) * bins, "seed centers");
+    const std::uint32_t parameters[2] = {pixels, bins};
+    context_.dispatch(
+        seed_centers_, {&output, &input},
+        parameters, sizeof(parameters), divide_up(pixels, 256));
+}
+
+void VulkanOperators::attractor_activate(
+    VulkanBuffer& values, std::uint32_t count) {
+    require_bytes(values, count, "attractors");
+    context_.dispatch(
+        attractor_activate_, {&values},
+        &count, sizeof(count), divide_up(count, 256));
+}
+
+void VulkanOperators::attractor_update(
+    VulkanBuffer& next, VulkanBuffer& centers,
+    const VulkanBuffer& previous, const VulkanBuffer& attractors,
+    std::uint32_t pixels, std::uint32_t bins,
+    std::uint32_t attractor_count, bool normed) {
+    require_bytes(previous, std::uint64_t(pixels) * bins, "previous centers");
+    require_bytes(next, std::uint64_t(pixels) * bins, "next centers");
+    require_bytes(centers, std::uint64_t(pixels) * bins, "output centers");
+    require_bytes(
+        attractors,
+        std::uint64_t(pixels) * attractor_count * (normed ? 2 : 1),
+        "attractors");
+    const std::uint32_t parameters[4] = {
+        pixels, bins, attractor_count, normed ? 1u : 0u};
+    context_.dispatch(
+        attractor_update_,
+        {&next, &centers, &previous, &attractors},
+        parameters, sizeof(parameters), divide_up(pixels, 64));
+}
+
+void VulkanOperators::distribution_depth(
+    VulkanBuffer& depth, const VulkanBuffer& parameters_buffer,
+    const VulkanBuffer& centers, std::uint32_t pixels) {
+    require_bytes(parameters_buffer, std::uint64_t(pixels) * 4, "distribution");
+    require_bytes(centers, std::uint64_t(pixels) * 64, "centers");
+    require_bytes(depth, pixels, "depth");
+    context_.dispatch(
+        distribution_depth_, {&depth, &parameters_buffer, &centers},
+        &pixels, sizeof(pixels), divide_up(pixels, 64));
 }
 
 }  // namespace zoe_native

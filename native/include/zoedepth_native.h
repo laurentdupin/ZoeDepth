@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ZOEDEPTH_ABI_VERSION 1u
+#define ZOEDEPTH_ABI_VERSION 2u
 
 typedef struct zoedepth_context zoedepth_context;
 
@@ -44,6 +44,11 @@ ZOEDEPTH_API const char* ZOEDEPTH_CALL zoedepth_last_error(void);
 ZOEDEPTH_API zoedepth_status ZOEDEPTH_CALL zoedepth_create(
     const char* native_model_path_utf8,
     zoedepth_variant variant,
+    zoedepth_context** context);
+ZOEDEPTH_API zoedepth_status ZOEDEPTH_CALL zoedepth_create_vulkan(
+    const char* native_model_path_utf8,
+    zoedepth_variant variant,
+    uint32_t device_index,
     zoedepth_context** context);
 ZOEDEPTH_API void ZOEDEPTH_CALL zoedepth_destroy(
     zoedepth_context* context);

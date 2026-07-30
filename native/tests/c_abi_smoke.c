@@ -13,7 +13,11 @@ int main(void) {
             0, ZOEDEPTH_VARIANT_N, &context) ==
         ZOEDEPTH_STATUS_INVALID_ARGUMENT);
     assert(context == 0);
+    assert(
+        zoedepth_create_vulkan(
+            0, ZOEDEPTH_VARIANT_N, 0, &context) ==
+        ZOEDEPTH_STATUS_INVALID_ARGUMENT);
+    assert(context == 0);
     zoedepth_destroy(0);
     return 0;
 }
-

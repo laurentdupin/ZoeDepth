@@ -7,6 +7,7 @@
 namespace zoe_native {
 
 GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
+    variant_ = model.derivation().variant;
     tensors_.reserve(model.tensor_count());
     for (std::string_view name : model.tensor_names()) {
         const TensorView& source = model.tensor(name);

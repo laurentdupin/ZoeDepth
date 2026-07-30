@@ -3,6 +3,13 @@
 #include "encoder_cpu.h"
 #include "graph_cpu.h"
 #include "model.h"
+#if defined(ZOEDEPTH_WITH_VULKAN)
+#include "encoder_gpu.h"
+#include "gpu_model.h"
+#include "graph_gpu.h"
+#include "operators.h"
+#include "vulkan.h"
+#endif
 
 #include <algorithm>
 #include <memory>
@@ -13,6 +20,11 @@
 
 struct zoedepth_context {
     std::unique_ptr<zoe_native::ModelFile> model;
+#if defined(ZOEDEPTH_WITH_VULKAN)
+    std::unique_ptr<zoe_native::VulkanContext> vulkan;
+    std::unique_ptr<zoe_native::GpuModel> gpu_model;
+    std::unique_ptr<zoe_native::VulkanOperators> operators;
+#endif
 };
 
 namespace {
@@ -55,7 +67,47 @@ uint32_t ZOEDEPTH_CALL zoedepth_abi_version(void) {
 }
 
 const char* ZOEDEPTH_CALL zoedepth_version_string(void) {
-    return "0.3.0-zoed-n-k-nk-cpu";
+    return "0.4.0-zoed-n-k-nk-cpu-vulkan";
+}
+
+zoedepth_status ZOEDEPTH_CALL zoedepth_create_vulkan(
+    const char* path,
+    zoedepth_variant variant,
+    uint32_t device_index,
+    zoedepth_context** context) {
+    if (!context || !path || path[0] == '\0' ||
+        (variant != ZOEDEPTH_VARIANT_N &&
+         variant != ZOEDEPTH_VARIANT_K &&
+         variant != ZOEDEPTH_VARIANT_NK)) {
+        return fail(
+            ZOEDEPTH_STATUS_INVALID_ARGUMENT,
+            "invalid ZoeDepth Vulkan creation input");
+    }
+    *context = nullptr;
+#if !defined(ZOEDEPTH_WITH_VULKAN)
+    (void)device_index;
+    return fail(
+        ZOEDEPTH_STATUS_UNSUPPORTED,
+        "this DLL was built without Vulkan");
+#else
+    return protect([&] {
+        auto result = std::make_unique<zoedepth_context>();
+        const zoe_native::Variant native_variant =
+            variant == ZOEDEPTH_VARIANT_K ? zoe_native::Variant::k :
+            variant == ZOEDEPTH_VARIANT_NK ? zoe_native::Variant::nk :
+            zoe_native::Variant::n;
+        result->model =
+            std::make_unique<zoe_native::ModelFile>(path, native_variant);
+        result->vulkan =
+            std::make_unique<zoe_native::VulkanContext>(device_index);
+        result->gpu_model =
+            std::make_unique<zoe_native::GpuModel>(
+                *result->model, *result->vulkan);
+        result->operators =
+            std::make_unique<zoe_native::VulkanOperators>(*result->vulkan);
+        *context = result.release();
+    });
+#endif
 }
 
 const char* ZOEDEPTH_CALL zoedepth_last_error(void) {
@@ -120,6 +172,38 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_infer_rgb_f32(
             "invalid ZoeDepth tensor inference input");
     }
     return protect([&] {
+#if defined(ZOEDEPTH_WITH_VULKAN)
+        if (context->vulkan) {
+            const std::uint64_t input_elements =
+                std::uint64_t(3) * width * height;
+            std::vector<float> prepared(
+                static_cast<std::size_t>(input_elements));
+            for (std::uint64_t index = 0;
+                 index < input_elements; ++index) {
+                prepared[static_cast<std::size_t>(index)] =
+                    (rgb[index] - 0.5f) / 0.5f;
+            }
+            zoe_native::VulkanBuffer image =
+                context->vulkan->create_device_buffer(
+                    input_elements * sizeof(float));
+            context->vulkan->upload(
+                image, prepared.data(),
+                prepared.size() * sizeof(float));
+            zoe_native::GpuFeature gpu_result =
+                zoe_native::full_graph_gpu(
+                    *context->vulkan, *context->gpu_model,
+                    *context->operators,
+                    zoe_native::encoder_gpu(
+                        *context->vulkan, *context->gpu_model,
+                        *context->operators, image,
+                        static_cast<std::uint32_t>(width),
+                        static_cast<std::uint32_t>(height)));
+            context->vulkan->download(
+                gpu_result.buffer, depth,
+                std::uint64_t(width) * height * sizeof(float));
+            return;
+        }
+#endif
         const std::uint64_t plane =
             static_cast<std::uint64_t>(width) *
             static_cast<std::uint64_t>(height);

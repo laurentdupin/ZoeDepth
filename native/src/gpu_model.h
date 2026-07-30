@@ -22,8 +22,10 @@ public:
     GpuModel(const ModelFile& model, VulkanContext& context);
     const GpuTensor& tensor(std::string_view name) const;
     std::size_t tensor_count() const { return tensors_.size(); }
+    Variant variant() const { return variant_; }
 
 private:
+    Variant variant_ = Variant::n;
     std::unordered_map<std::string_view, GpuTensor> tensors_;
 };
 

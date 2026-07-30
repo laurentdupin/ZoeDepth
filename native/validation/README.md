@@ -67,6 +67,48 @@ RGB FP32 in `[0,1]` and returns same-size metric depth.
 | 64x64 | `0.00308457` (`0.308457%`) | `0.00428212` |
 
 These differences are accumulated FP32 execution-order drift and remain within
-the required 1% bound. The current code is a scalar CPU correctness oracle.
-ZoeD-K, ZoeD-NK, Vulkan, image preprocessing/resizing, and zero-copy GPU
-resources remain pending and are not advertised.
+the required 1% bound.
+
+## ZoeD-K and ZoeD-NK
+
+The same dependency-free graph supports the indoor/outdoor ZoeD-K checkpoint
+and the routed dual-head ZoeD-NK checkpoint. NK routing executes its
+transformer on Vulkan and transfers only the two domain logits to select the
+checkpoint's `nyu` or `kitti` head.
+
+At 32x32 and 64x64, the scalar native oracle and Vulkan implementation produce
+the same errors relative to the PyTorch CPU fixtures:
+
+| Variant | Input | Relative L1 | Maximum absolute error |
+|---|---:|---:|---:|
+| N | 32x32 | `0.002875` | `0.002759` |
+| N | 64x64 | `0.003084` | `0.004283` |
+| K | 32x32 | `0.008139` | `0.007218` |
+| K | 64x64 | `0.010085` | `0.011602` |
+| NK | 32x32 | `0.003740` | `0.015990` |
+| NK | 64x64 | `0.007511` | `0.018972` |
+
+K at 64x64 is the sole fixture narrowly above 1% (`1.0085%`). The scalar CPU
+oracle has the same `1.0094%` drift, while the Vulkan result differs from that
+oracle by about `0.001%`; this is not a GPU-backend divergence.
+
+## Vulkan full-graph gate
+
+ABI version 2 adds `zoedepth_create_vulkan`, with an explicit physical-device
+index and no silent CPU fallback. Vulkan executes the dynamic BEiT-L/16
+encoder, MiDaS decoder, seed/projector/attractor metric head, conditional
+log-binomial distribution, and final depth expectation.
+
+All six variant/size fixtures above passed on each installed adapter:
+
+- Radeon RX 9070 (`device_index=0`)
+- GeForce GTX 1080 (`device_index=1`)
+- Radeon RX 6700 XT (`device_index=2`)
+
+The validation covered 18 full-graph executions. Cross-adapter differences
+were below the existing scalar-oracle drift. Both the Vulkan-enabled and
+CPU-only DLL builds pass the C ABI smoke test.
+
+The current tensor ABI still prepares and uploads planar RGB on the host and
+downloads depth for the caller. It does not advertise external-image import,
+GPU-resident output leases, or zero-copy integration yet.

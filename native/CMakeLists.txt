@@ -59,7 +59,11 @@ if(ZOEDEPTH_WITH_VULKAN)
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
             group_norm silu nearest concatenate add_channel nchw_tokens
             geglu attention_scores attention_values preprocess_rgb
-            posterior_sample scale_values depth_output)
+            posterior_sample scale_values depth_output
+            prepare_beit qv_bias relative_bias readout_concat
+            tokens_to_nchw_plain softplus router_tokens qkv_split
+            seed_centers attractor_activate attractor_update
+            distribution_depth)
         zoedepth_compile_shader(${SHADER})
     endforeach()
 endif()
@@ -74,6 +78,7 @@ add_library(zoedepth_model SHARED src/zoedepth.cpp)
 if(ZOEDEPTH_WITH_VULKAN)
     target_sources(zoedepth_model PRIVATE
         src/vulkan.cpp src/operators.cpp src/gpu_model.cpp
+        src/encoder_gpu.cpp src/graph_gpu.cpp
         ${ZOEDEPTH_SHADER_HEADERS})
     target_include_directories(
         zoedepth_model PRIVATE "${ZOEDEPTH_GENERATED_DIR}")
@@ -124,6 +129,26 @@ if(BUILD_TESTING)
     add_test(
         NAME zoedepth_c_abi_smoke
         COMMAND zoedepth_c_abi_smoke)
+    if(ZOEDEPTH_WITH_VULKAN)
+        add_executable(
+            zoedepth_gpu_encoder_probe
+            tools/gpu_encoder_probe.cpp
+            src/model.cpp src/vulkan.cpp src/operators.cpp
+            src/gpu_model.cpp src/encoder_gpu.cpp
+            ${ZOEDEPTH_SHADER_HEADERS})
+        target_include_directories(
+            zoedepth_gpu_encoder_probe PRIVATE
+            include src "${ZOEDEPTH_GENERATED_DIR}")
+        target_link_libraries(
+            zoedepth_gpu_encoder_probe PRIVATE Vulkan::Vulkan)
+        add_executable(
+            zoedepth_gpu_full_graph_probe
+            tools/gpu_full_graph_probe.cpp)
+        target_link_libraries(
+            zoedepth_gpu_full_graph_probe PRIVATE zoedepth_model)
+        target_include_directories(
+            zoedepth_gpu_full_graph_probe PRIVATE include)
+    endif()
 endif()
 
 if(MSVC)

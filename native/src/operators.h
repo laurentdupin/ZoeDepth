@@ -174,6 +174,48 @@ public:
         VulkanBuffer& output, const VulkanBuffer& decoded,
         std::uint32_t source_width, std::uint32_t source_height,
         std::uint32_t target_width, std::uint32_t target_height);
+    void prepare_beit(
+        VulkanBuffer& output, const VulkanBuffer& image,
+        const VulkanBuffer& weight, const VulkanBuffer& bias,
+        const VulkanBuffer& class_token,
+        std::uint32_t width, std::uint32_t height);
+    void qv_bias(
+        VulkanBuffer& qkv, const VulkanBuffer& q_bias,
+        const VulkanBuffer& v_bias,
+        std::uint32_t tokens, std::uint32_t embedding);
+    void attention_head64_relative(
+        VulkanBuffer& output, const VulkanBuffer& qkv,
+        const VulkanBuffer& table, VulkanBuffer& scores,
+        std::uint32_t patch_width, std::uint32_t patch_height,
+        std::uint32_t heads);
+    void readout_concat(
+        VulkanBuffer& output, const VulkanBuffer& tokens,
+        std::uint32_t patches, std::uint32_t embedding);
+    void tokens_to_nchw_plain(
+        VulkanBuffer& output, const VulkanBuffer& tokens,
+        std::uint32_t token_count, std::uint32_t channels);
+    void softplus(VulkanBuffer& values, std::uint32_t count);
+    void gelu_values(VulkanBuffer& values, std::uint32_t count);
+    void router_tokens(
+        VulkanBuffer& output, const VulkanBuffer& embedded,
+        std::uint32_t spatial, std::uint32_t features);
+    void qkv_split(
+        VulkanBuffer& query, VulkanBuffer& key, VulkanBuffer& value,
+        const VulkanBuffer& qkv,
+        std::uint32_t tokens, std::uint32_t dimensions);
+    void seed_centers(
+        VulkanBuffer& output, const VulkanBuffer& input,
+        std::uint32_t pixels, std::uint32_t bins);
+    void attractor_activate(
+        VulkanBuffer& values, std::uint32_t count);
+    void attractor_update(
+        VulkanBuffer& next, VulkanBuffer& centers,
+        const VulkanBuffer& previous, const VulkanBuffer& attractors,
+        std::uint32_t pixels, std::uint32_t bins,
+        std::uint32_t attractor_count, bool normed);
+    void distribution_depth(
+        VulkanBuffer& depth, const VulkanBuffer& parameters,
+        const VulkanBuffer& centers, std::uint32_t pixels);
 
 private:
     VulkanContext& context_;
@@ -217,6 +259,18 @@ private:
     VulkanPipeline posterior_sample_;
     VulkanPipeline scale_values_;
     VulkanPipeline depth_output_;
+    VulkanPipeline prepare_beit_;
+    VulkanPipeline qv_bias_;
+    VulkanPipeline relative_bias_;
+    VulkanPipeline readout_concat_;
+    VulkanPipeline tokens_to_nchw_plain_;
+    VulkanPipeline softplus_;
+    VulkanPipeline router_tokens_;
+    VulkanPipeline qkv_split_;
+    VulkanPipeline seed_centers_;
+    VulkanPipeline attractor_activate_;
+    VulkanPipeline attractor_update_;
+    VulkanPipeline distribution_depth_;
 };
 
 }  // namespace zoe_native
