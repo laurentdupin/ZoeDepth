@@ -10,6 +10,60 @@ if(MSVC)
         "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+option(ZOEDEPTH_WITH_VULKAN
+    "Build the dependency-free Vulkan executor" ON)
+
+if(ZOEDEPTH_WITH_VULKAN)
+    find_package(Vulkan REQUIRED COMPONENTS glslc)
+    set(ZOEDEPTH_GENERATED_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    file(MAKE_DIRECTORY "${ZOEDEPTH_GENERATED_DIR}")
+    function(zoedepth_compile_shader NAME)
+        set(SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${NAME}.glsl")
+        set(SPIRV "${ZOEDEPTH_GENERATED_DIR}/${NAME}.spv")
+        set(HEADER "${ZOEDEPTH_GENERATED_DIR}/${NAME}_spv.h")
+        add_custom_command(
+            OUTPUT "${SPIRV}"
+            COMMAND Vulkan::glslc -fshader-stage=compute
+                --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+                -o "${SPIRV}" "${SOURCE}"
+            DEPENDS
+                "${SOURCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/indexing.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv2d_common.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/linear_common.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/project_tokens_common.glsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv_transpose_nonoverlap_common.glsl"
+            VERBATIM)
+        add_custom_command(
+            OUTPUT "${HEADER}"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DINPUT=${SPIRV}" "-DOUTPUT=${HEADER}"
+                "-DVARIABLE=zoe_${NAME}_spv"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            DEPENDS "${SPIRV}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            VERBATIM)
+        set(ZOEDEPTH_SHADER_HEADERS
+            ${ZOEDEPTH_SHADER_HEADERS} "${HEADER}" PARENT_SCOPE)
+    endfunction()
+    foreach(SHADER
+            add_scaled add add_position bilinear_align_true
+            bilinear_align_true_image bmm bmm_score_half bmm_value_half
+            conv2d conv2d8 conv2d_half conv2d8_half
+            conv_transpose_nonoverlap conv_transpose_nonoverlap_half
+            elementwise gelu layer_norm linear linear16 linear_half
+            linear16_half prepare_tokens position_bicubic project_tokens
+            project_tokens_half relu softmax_lastdim softmax_lastdim_half
+            group_norm silu nearest concatenate add_channel nchw_tokens
+            geglu attention_scores attention_values preprocess_rgb
+            posterior_sample scale_values depth_output)
+        zoedepth_compile_shader(${SHADER})
+    endforeach()
+endif()
+
 add_library(zoedepth_core STATIC
     src/model.cpp
     src/encoder_cpu.cpp
@@ -17,6 +71,16 @@ add_library(zoedepth_core STATIC
 target_include_directories(zoedepth_core PUBLIC src)
 
 add_library(zoedepth_model SHARED src/zoedepth.cpp)
+if(ZOEDEPTH_WITH_VULKAN)
+    target_sources(zoedepth_model PRIVATE
+        src/vulkan.cpp src/operators.cpp src/gpu_model.cpp
+        ${ZOEDEPTH_SHADER_HEADERS})
+    target_include_directories(
+        zoedepth_model PRIVATE "${ZOEDEPTH_GENERATED_DIR}")
+    target_link_libraries(zoedepth_model PRIVATE Vulkan::Vulkan)
+    target_compile_definitions(
+        zoedepth_model PRIVATE ZOEDEPTH_WITH_VULKAN=1)
+endif()
 target_include_directories(
     zoedepth_model PUBLIC include PRIVATE src)
 target_link_libraries(zoedepth_model PRIVATE zoedepth_core)

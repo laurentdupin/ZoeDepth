@@ -42,6 +42,7 @@ public:
     const TensorView& tensor(std::string_view name) const;
     bool contains(std::string_view name) const;
     std::size_t tensor_count() const { return tensors_.size(); }
+    std::vector<std::string_view> tensor_names() const;
     const Derivation& derivation() const { return derivation_; }
 
 private:
@@ -60,4 +61,3 @@ private:
 };
 
 }  // namespace zoe_native
-

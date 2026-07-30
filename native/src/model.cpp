@@ -328,5 +328,13 @@ bool ModelFile::contains(std::string_view name) const {
     return tensors_.find(std::string(name)) != tensors_.end();
 }
 
-}  // namespace zoe_native
+std::vector<std::string_view> ModelFile::tensor_names() const {
+    std::vector<std::string_view> result;
+    result.reserve(tensors_.size());
+    for (const auto& entry : tensors_) {
+        result.emplace_back(entry.first);
+    }
+    return result;
+}
 
+}  // namespace zoe_native
