@@ -32,4 +32,18 @@ variant, tensor directory bounds, ranks, dimensions, non-overlap, payload byte
 counts, and derivation metadata. The real catalog checkpoint passes its native
 model probe.
 
-Full graph CPU-reference validation remains pending.
+## BEiT-L/16 encoder gate
+
+The correctness-first scalar implementation covers patch embedding, all 24
+transformer blocks, per-block interpolated relative-position bias, attention,
+LayerScale, and MLP branches. A deterministic 32x32 tensor was compared at the
+four MiDaS feature taps:
+
+| Block | Relative L1 | Maximum absolute error |
+|---:|---:|---:|
+| 5 | `1.80879e-6` (`0.000181%`) | `0.000100136` |
+| 11 | `1.73310e-6` (`0.000173%`) | `0.000167847` |
+| 17 | `1.78015e-6` (`0.000178%`) | `0.000343323` |
+| 23 | `3.99074e-6` (`0.000399%`) | `0.00128174` |
+
+The MiDaS decoder and Zoe metric-bin head remain pending.
