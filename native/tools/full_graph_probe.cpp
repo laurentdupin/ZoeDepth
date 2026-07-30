@@ -27,23 +27,32 @@ std::vector<float> read_floats(
 }
 
 int main(int argc, char** argv) {
-    if (argc != 6) {
+    if (argc != 7) {
         std::cerr
-            << "usage: zoedepth_full_graph_probe model.zoe size "
+            << "usage: zoedepth_full_graph_probe model.zoe variant size "
                "rgb.bin depth.bin tolerance\n";
         return 2;
     }
     try {
         const std::uint32_t size =
-            static_cast<std::uint32_t>(std::stoul(argv[2]));
-        const double tolerance = std::stod(argv[5]);
+            static_cast<std::uint32_t>(std::stoul(argv[3]));
+        const double tolerance = std::stod(argv[6]);
         const std::vector<float> input = read_floats(
-            argv[3], std::uint64_t(3) * size * size);
+            argv[4], std::uint64_t(3) * size * size);
         const std::vector<float> reference = read_floats(
-            argv[4], std::uint64_t(size) * size);
+            argv[5], std::uint64_t(size) * size);
+        zoedepth_variant variant = ZOEDEPTH_VARIANT_N;
+        const std::string variant_name = argv[2];
+        if (variant_name == "k") {
+            variant = ZOEDEPTH_VARIANT_K;
+        } else if (variant_name == "nk") {
+            variant = ZOEDEPTH_VARIANT_NK;
+        } else if (variant_name != "n") {
+            throw std::invalid_argument("invalid variant");
+        }
         zoedepth_context* context = nullptr;
         const zoedepth_status create_status = zoedepth_create(
-            argv[1], ZOEDEPTH_VARIANT_N, &context);
+            argv[1], variant, &context);
         if (create_status != ZOEDEPTH_STATUS_OK) {
             throw std::runtime_error(zoedepth_last_error());
         }

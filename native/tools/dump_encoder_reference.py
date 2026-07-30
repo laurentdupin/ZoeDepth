@@ -11,7 +11,9 @@ import numpy as np
 import torch
 
 
-def build_model(repo: Path, midas_repo: Path, checkpoint: Path, size: int):
+def build_model(
+        repo: Path, midas_repo: Path, checkpoint: Path, size: int,
+        variant: str = "n"):
     sys.path.insert(0, str(repo))
     from zoedepth.models.base_models.midas import MidasCore
     from zoedepth.models.zoedepth.zoedepth_v1 import ZoeDepth
@@ -28,12 +30,35 @@ def build_model(repo: Path, midas_repo: Path, checkpoint: Path, size: int):
         midas, trainable=False, fetch_features=True, freeze_bn=True,
         img_size=[size, size], keep_aspect_ratio=True)
     core.set_output_channels("DPT_BEiT_L_384")
-    model = ZoeDepth(
-        core, n_bins=64, bin_embedding_dim=128,
-        bin_centers_type="softplus", n_attractors=[16, 8, 4, 1],
-        attractor_alpha=1000, attractor_gamma=2,
-        attractor_kind="mean", attractor_type="inv",
-        min_temp=0.0212, max_temp=50.0, memory_efficient=True)
+    if variant in ("n", "k"):
+        model = ZoeDepth(
+            core, n_bins=64, bin_embedding_dim=128,
+            bin_centers_type=(
+                "normed" if variant == "k" else "softplus"),
+            n_attractors=[16, 8, 4, 1],
+            attractor_alpha=1000, attractor_gamma=2,
+            attractor_kind="mean", attractor_type="inv",
+            min_temp=0.0212, max_temp=50.0,
+            memory_efficient=True)
+    elif variant == "nk":
+        from zoedepth.models.zoedepth_nk.zoedepth_nk_v1 import (
+            ZoeDepthNK)
+        model = ZoeDepthNK(
+            core,
+            bin_conf=[
+                {"name": "nyu", "n_bins": 64,
+                 "min_depth": 1e-3, "max_depth": 10.0},
+                {"name": "kitti", "n_bins": 64,
+                 "min_depth": 1e-3, "max_depth": 80.0},
+            ],
+            bin_embedding_dim=128, bin_centers_type="softplus",
+            n_attractors=[16, 8, 4, 1],
+            attractor_alpha=1000, attractor_gamma=2,
+            attractor_kind="mean", attractor_type="inv",
+            min_temp=0.0212, max_temp=50.0,
+            memory_efficient=True)
+    else:
+        raise ValueError(f"unsupported ZoeDepth variant: {variant}")
     archive = torch.load(
         checkpoint, map_location="cpu", weights_only=True)
     incompatible = model.load_state_dict(archive["model"], strict=False)
@@ -51,11 +76,12 @@ def main() -> None:
     parser.add_argument("--midas-repo", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--size", type=int, default=32)
+    parser.add_argument("--variant", choices=("n", "k", "nk"), default="n")
     parser.add_argument("--output-prefix", type=Path, required=True)
     args = parser.parse_args()
     model = build_model(
         args.repo.resolve(), args.midas_repo.resolve(),
-        args.checkpoint.resolve(), args.size)
+        args.checkpoint.resolve(), args.size, args.variant)
 
     captures = {}
     handles = []

@@ -490,6 +490,12 @@ Image metric_depth_cpu(
         throw std::invalid_argument(
             "invalid ZoeDepth decoder output");
     }
+    const bool normed =
+        model.derivation().variant == Variant::k;
+    if (model.derivation().variant == Variant::nk) {
+        throw std::runtime_error(
+            "ZoeD-NK metric routing is not implemented");
+    }
     Image bottleneck = conv2d(
         model, decoded.bottleneck,
         "conv2.weight", "conv2.bias", 1, 0);
@@ -503,7 +509,35 @@ Image metric_depth_cpu(
         model, b_previous,
         "seed_bin_regressor._net.2.weight",
         "seed_bin_regressor._net.2.bias", 1, 0);
-    softplus(b_previous);
+    if (normed) {
+        relu(b_previous);
+        const std::uint64_t pixels =
+            std::uint64_t(b_previous.height) * b_previous.width;
+        Image normalized_centers = b_previous;
+        for (std::uint64_t pixel = 0; pixel < pixels; ++pixel) {
+            float sum = 0.0f;
+            for (std::uint32_t bin = 0;
+                 bin < b_previous.channels; ++bin) {
+                b_previous.values[
+                    std::uint64_t(bin) * pixels + pixel] += 1.0e-3f;
+                sum += b_previous.values[
+                    std::uint64_t(bin) * pixels + pixel];
+            }
+            float edge = 0.0f;
+            for (std::uint32_t bin = 0;
+                 bin < b_previous.channels; ++bin) {
+                const float width = b_previous.values[
+                    std::uint64_t(bin) * pixels + pixel] / sum;
+                normalized_centers.values[
+                    std::uint64_t(bin) * pixels + pixel] =
+                    edge + 0.5f * width;
+                edge += width;
+            }
+        }
+        b_previous = std::move(normalized_centers);
+    } else {
+        softplus(b_previous);
+    }
     Image previous_embedding = projector(
         model, bottleneck, "seed_projector._net");
 
@@ -533,8 +567,17 @@ Image metric_depth_cpu(
             "attractors." + std::to_string(level) +
                 "._net.2.bias",
             1, 0);
-        softplus(attractors);
-        if (attractors.channels != attractor_counts[level]) {
+        if (normed) {
+            relu(attractors);
+            for (float& value : attractors.values) {
+                value += 1.0e-3f;
+            }
+        } else {
+            softplus(attractors);
+        }
+        const std::uint32_t expected_attractor_channels =
+            attractor_counts[level] * (normed ? 2u : 1u);
+        if (attractors.channels != expected_attractor_channels) {
             throw std::runtime_error(
                 "unexpected ZoeDepth attractor count");
         }
@@ -552,11 +595,13 @@ Image metric_depth_cpu(
                         std::uint64_t(bin) * pixels + pixel];
                 float delta = 0.0f;
                 for (std::uint32_t attractor = 0;
-                     attractor < attractors.channels;
+                     attractor < attractor_counts[level];
                      ++attractor) {
+                    const std::uint32_t attractor_channel =
+                        normed ? attractor * 2 : attractor;
                     const float difference =
                         attractors.values[
-                            std::uint64_t(attractor) * pixels +
+                            std::uint64_t(attractor_channel) * pixels +
                             pixel] -
                         center;
                     delta += difference /
@@ -566,10 +611,37 @@ Image metric_depth_cpu(
                 centers.values[
                     std::uint64_t(bin) * pixels + pixel] =
                     center + delta /
-                        static_cast<float>(attractors.channels);
+                        static_cast<float>(
+                            attractor_counts[level]);
             }
         }
-        b_previous = centers;
+        if (normed) {
+            b_previous = centers;
+            constexpr float minimum_depth = 1.0e-3f;
+            constexpr float maximum_depth = 10.0f;
+            for (std::uint64_t pixel = 0; pixel < pixels; ++pixel) {
+                std::vector<float> sorted(centers.channels);
+                for (std::uint32_t bin = 0;
+                     bin < centers.channels; ++bin) {
+                    sorted[bin] = std::clamp(
+                        (maximum_depth - minimum_depth) *
+                                centers.values[
+                                    std::uint64_t(bin) * pixels +
+                                    pixel] +
+                            minimum_depth,
+                        minimum_depth, maximum_depth);
+                }
+                std::sort(sorted.begin(), sorted.end());
+                for (std::uint32_t bin = 0;
+                     bin < centers.channels; ++bin) {
+                    centers.values[
+                        std::uint64_t(bin) * pixels + pixel] =
+                        sorted[bin];
+                }
+            }
+        } else {
+            b_previous = centers;
+        }
         previous_embedding = embedding;
     }
 

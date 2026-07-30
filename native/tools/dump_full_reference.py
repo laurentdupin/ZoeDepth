@@ -18,11 +18,12 @@ def main() -> None:
     parser.add_argument("--midas-repo", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--size", type=int, default=32)
+    parser.add_argument("--variant", choices=("n", "k", "nk"), default="n")
     parser.add_argument("--output-prefix", type=Path, required=True)
     args = parser.parse_args()
     model = build_model(
         args.repo.resolve(), args.midas_repo.resolve(),
-        args.checkpoint.resolve(), args.size)
+        args.checkpoint.resolve(), args.size, args.variant)
 
     generator = torch.Generator().manual_seed(20260730)
     rgb = torch.rand(
@@ -51,6 +52,7 @@ def main() -> None:
         prefix.with_suffix(".probs.bin"))
     names = ("out_conv", "l4_rn", "r4", "r3", "r2", "r1")
     report = {
+        "variant": args.variant,
         "rgb_shape": list(rgb.shape),
         "relative_shape": list(relative["depth"].shape),
         "depth_shape": list(depth.shape),
@@ -60,6 +62,14 @@ def main() -> None:
         "depth_sum": float(depth.double().sum()),
         "decoder_taps": [],
     }
+    if "domain_logits" in outputs:
+        logits = outputs["domain_logits"].detach().cpu()
+        logits.numpy().astype(np.float32).tofile(
+            prefix.with_suffix(".domain_logits.bin"))
+        report["domain_logits"] = logits.flatten().tolist()
+        report["selected_domain"] = (
+            "nyu" if int(logits.sum(dim=0).argmax()) == 0
+            else "kitti")
     for name in names:
         tensor = model.core.core_out[name].detach().cpu()
         tensor.numpy().astype(np.float32).tofile(

@@ -49,7 +49,8 @@ ZOEDEPTH_API void ZOEDEPTH_CALL zoedepth_destroy(
     zoedepth_context* context);
 
 /*
- * Executes ZoeD-M12-N. Input is contiguous planar RGB FP32 in [0,1].
+ * Executes the ZoeD-M12 variant selected at context creation. Input is
+ * contiguous planar RGB FP32 in [0,1].
  * Width and height must be positive multiples of 32. Output is contiguous
  * metric depth HW FP32 at the same dimensions.
  */
@@ -67,4 +68,3 @@ zoedepth_infer_rgb_f32(
 #endif
 
 #endif
-
