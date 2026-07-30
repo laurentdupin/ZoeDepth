@@ -12,6 +12,7 @@
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
 #include "conv2d8_half_spv.h"
+#include "conv2d_tiled_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
 #include "conv_transpose_nonoverlap_half_spv.h"
 #include "gelu_spv.h"
@@ -20,6 +21,7 @@
 #include "linear16_spv.h"
 #include "linear_half_spv.h"
 #include "linear16_half_spv.h"
+#include "linear_vec8_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -103,6 +105,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           zoe_linear16_half_spv_size,
           4,
           12)),
+      linear_vec8_(context.create_pipeline(
+          zoe_linear_vec8_spv,
+          zoe_linear_vec8_spv_size,
+          4,
+          12)),
       gelu_(context.create_pipeline(
           zoe_gelu_spv, zoe_gelu_spv_size, 2, 4)),
       layer_norm_(context.create_pipeline(
@@ -177,6 +184,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       conv2d8_half_(context.create_pipeline(
           zoe_conv2d8_half_spv,
           zoe_conv2d8_half_spv_size,
+          4,
+          48)),
+      conv2d_tiled_(context.create_pipeline(
+          zoe_conv2d_tiled_spv,
+          zoe_conv2d_tiled_spv_size,
           4,
           48)),
       conv_transpose_nonoverlap_(context.create_pipeline(
@@ -265,6 +277,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
     linear16_half_.set_debug_name("linear16_half");
+    linear_vec8_.set_debug_name("linear_vec8");
     gelu_.set_debug_name("gelu");
     layer_norm_.set_debug_name("layer_norm");
     add_scaled_.set_debug_name("add_scaled");
@@ -285,6 +298,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv2d8_.set_debug_name("conv2d8");
     conv2d_half_.set_debug_name("conv2d_half");
     conv2d8_half_.set_debug_name("conv2d8_half");
+    conv2d_tiled_.set_debug_name("conv2d_tiled");
     conv_transpose_nonoverlap_.set_debug_name(
         "conv_transpose_nonoverlap");
     conv_transpose_nonoverlap_half_.set_debug_name(
@@ -340,9 +354,11 @@ void VulkanOperators::linear(
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
     context_.dispatch(
-        half_weight
+        !half_weight && context_.subgroup_size() == 32
+            ? linear_vec8_
+            : (half_weight
             ? (block16 ? linear16_half_ : linear_half_)
-            : (block16 ? linear16_ : linear_),
+            : (block16 ? linear16_ : linear_)),
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
@@ -804,10 +820,17 @@ void VulkanOperators::conv2d(
         has_bias ? 1u : 0u,
         batches, output_channel_blocks,
     };
+    const bool tiled =
+        !half_weight && !block8 && kernel == 3 && stride == 1 &&
+        padding == 1 && input_width == output_width &&
+        input_height == output_height &&
+        context_.subgroup_size() == 32;
     context_.dispatch(
-        half_weight
+        tiled
+            ? conv2d_tiled_
+            : (half_weight
             ? (block8 ? conv2d8_half_ : conv2d_half_)
-            : (block8 ? conv2d8_ : conv2d_),
+            : (block8 ? conv2d8_ : conv2d_)),
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
