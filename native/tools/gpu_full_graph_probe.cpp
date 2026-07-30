@@ -25,8 +25,9 @@ std::vector<float> read(const std::string& path, std::uint64_t count) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 8) {
-        std::cerr << "usage: gpu_probe model variant device size rgb depth tolerance\n";
+    if (argc != 8 && argc != 9) {
+        std::cerr << "usage: gpu_probe model variant device size rgb depth "
+                     "tolerance [iterations]\n";
         return 2;
     }
     zoedepth_context* context = nullptr;
@@ -44,6 +45,11 @@ int main(int argc, char** argv) {
         const std::uint32_t size =
             static_cast<std::uint32_t>(std::stoul(argv[4]));
         const double tolerance = std::stod(argv[7]);
+        const std::uint32_t iterations =
+            argc == 9 ? static_cast<std::uint32_t>(std::stoul(argv[8])) : 1u;
+        if (iterations == 0u) {
+            throw std::invalid_argument("iterations must be positive");
+        }
         const std::vector<float> input =
             read(argv[5], std::uint64_t(3) * size * size);
         const std::vector<float> reference =
@@ -57,15 +63,21 @@ int main(int argc, char** argv) {
         const double create_seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - create_start).count();
         std::vector<float> output(reference.size());
-        const auto start = std::chrono::steady_clock::now();
-        status = zoedepth_infer_rgb_f32(
-            context, input.data(), static_cast<int32_t>(size),
-            static_cast<int32_t>(size), output.data(), output.size());
-        const double seconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - start).count();
-        if (status != ZOEDEPTH_STATUS_OK) {
-            throw std::runtime_error(zoedepth_last_error());
+        std::vector<double> samples;
+        samples.reserve(iterations);
+        for (std::uint32_t iteration = 0u;
+             iteration < iterations; ++iteration) {
+            const auto start = std::chrono::steady_clock::now();
+            status = zoedepth_infer_rgb_f32(
+                context, input.data(), static_cast<int32_t>(size),
+                static_cast<int32_t>(size), output.data(), output.size());
+            samples.push_back(std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count());
+            if (status != ZOEDEPTH_STATUS_OK) {
+                throw std::runtime_error(zoedepth_last_error());
+            }
         }
+        std::sort(samples.begin(), samples.end());
         double difference = 0.0;
         double magnitude = 0.0;
         float maximum = 0.0f;
@@ -83,7 +95,8 @@ int main(int argc, char** argv) {
             sum += value;
         }
         std::cout << "create_seconds=" << create_seconds
-                  << "\nseconds=" << seconds
+                  << "\niterations=" << iterations
+                  << "\nmedian_ms=" << samples[samples.size() / 2u]
                   << "\nminimum=" << *bounds.first
                   << "\nmaximum=" << *bounds.second
                   << "\nmean=" << sum / output.size()

@@ -244,59 +244,61 @@ GpuDecoderOutput decode(
     VulkanContext& context, GpuModel& model,
     VulkanOperators& operators, const VulkanBuffer& zero,
     GpuEncoderOutput&& encoded) {
-    GpuFeature layers[4];
-    GpuFeature refined[4];
-    for (std::uint32_t level = 0; level < 4; ++level) {
-        layers[level] = postprocess(
-            context, model, operators, zero,
-            encoded.captures[level],
-            encoded.patch_height, encoded.patch_width, level);
-        refined[level] = conv(
-            context, model, operators, zero, layers[level],
-            "core.core.scratch.layer" +
-                std::to_string(level + 1) + "_rn.weight",
-            "", 1, 1);
-    }
     GpuDecoderOutput output;
-    output.bottleneck = clone(context, refined[3]);
-    GpuFeature path = fusion(
-        context, model, operators, zero, std::move(refined[3]), nullptr,
-        "core.core.scratch.refinenet4",
-        refined[2].height, refined[2].width);
-    output.refinement_blocks.push_back(clone(context, path));
-    path = fusion(
-        context, model, operators, zero, std::move(path), &refined[2],
-        "core.core.scratch.refinenet3",
-        refined[1].height, refined[1].width);
-    output.refinement_blocks.push_back(clone(context, path));
-    path = fusion(
-        context, model, operators, zero, std::move(path), &refined[1],
-        "core.core.scratch.refinenet2",
-        refined[0].height, refined[0].width);
-    output.refinement_blocks.push_back(clone(context, path));
-    path = fusion(
-        context, model, operators, zero, std::move(path), &refined[0],
-        "core.core.scratch.refinenet1",
-        refined[0].height * 2, refined[0].width * 2);
-    output.refinement_blocks.push_back(clone(context, path));
-    path = conv(
-        context, model, operators, zero, path,
-        "core.core.scratch.output_conv.0.weight",
-        "core.core.scratch.output_conv.0.bias", 1, 1);
-    path = resize(
-        context, operators, path, path.height * 2, path.width * 2);
-    path = conv(
-        context, model, operators, zero, path,
-        "core.core.scratch.output_conv.2.weight",
-        "core.core.scratch.output_conv.2.bias", 1, 1);
-    relu(operators, path);
-    output.out_conv = clone(context, path);
-    path = conv(
-        context, model, operators, zero, path,
-        "core.core.scratch.output_conv.4.weight",
-        "core.core.scratch.output_conv.4.bias", 1, 0);
-    relu(operators, path);
-    output.relative_depth = std::move(path);
+    context.batch([&] {
+        GpuFeature layers[4];
+        GpuFeature refined[4];
+        for (std::uint32_t level = 0; level < 4; ++level) {
+            layers[level] = postprocess(
+                context, model, operators, zero,
+                encoded.captures[level],
+                encoded.patch_height, encoded.patch_width, level);
+            refined[level] = conv(
+                context, model, operators, zero, layers[level],
+                "core.core.scratch.layer" +
+                    std::to_string(level + 1) + "_rn.weight",
+                "", 1, 1);
+        }
+        output.bottleneck = clone(context, refined[3]);
+        GpuFeature path = fusion(
+            context, model, operators, zero, std::move(refined[3]), nullptr,
+            "core.core.scratch.refinenet4",
+            refined[2].height, refined[2].width);
+        output.refinement_blocks.push_back(clone(context, path));
+        path = fusion(
+            context, model, operators, zero, std::move(path), &refined[2],
+            "core.core.scratch.refinenet3",
+            refined[1].height, refined[1].width);
+        output.refinement_blocks.push_back(clone(context, path));
+        path = fusion(
+            context, model, operators, zero, std::move(path), &refined[1],
+            "core.core.scratch.refinenet2",
+            refined[0].height, refined[0].width);
+        output.refinement_blocks.push_back(clone(context, path));
+        path = fusion(
+            context, model, operators, zero, std::move(path), &refined[0],
+            "core.core.scratch.refinenet1",
+            refined[0].height * 2, refined[0].width * 2);
+        output.refinement_blocks.push_back(clone(context, path));
+        path = conv(
+            context, model, operators, zero, path,
+            "core.core.scratch.output_conv.0.weight",
+            "core.core.scratch.output_conv.0.bias", 1, 1);
+        path = resize(
+            context, operators, path, path.height * 2, path.width * 2);
+        path = conv(
+            context, model, operators, zero, path,
+            "core.core.scratch.output_conv.2.weight",
+            "core.core.scratch.output_conv.2.bias", 1, 1);
+        relu(operators, path);
+        output.out_conv = clone(context, path);
+        path = conv(
+            context, model, operators, zero, path,
+            "core.core.scratch.output_conv.4.weight",
+            "core.core.scratch.output_conv.4.bias", 1, 0);
+        relu(operators, path);
+        output.relative_depth = std::move(path);
+    });
     return output;
 }
 
@@ -304,90 +306,95 @@ std::string route_nk(
     VulkanContext& context, GpuModel& model,
     VulkanOperators& operators, const VulkanBuffer& zero,
     const GpuFeature& bottleneck) {
-    GpuFeature embedded = conv(
-        context, model, operators, zero, bottleneck,
-        "patch_transformer.embedding_convPxP.weight",
-        "patch_transformer.embedding_convPxP.bias", 1, 0);
-    const std::uint32_t spatial = embedded.height * embedded.width;
-    const std::uint32_t token_count = spatial + 1;
-    const VkDeviceSize token_bytes =
-        std::uint64_t(token_count) * 128 * sizeof(float);
-    VulkanBuffer tokens = context.create_device_buffer(token_bytes);
-    operators.router_tokens(tokens, embedded.buffer, spatial, 128);
-    for (std::uint32_t layer = 0; layer < 4; ++layer) {
-        const std::string base =
-            "patch_transformer.transformer_encoder.layers." +
-            std::to_string(layer);
-        VulkanBuffer qkv =
-            context.create_device_buffer(token_bytes * 3);
+    VulkanBuffer logits;
+    context.batch([&] {
+        GpuFeature embedded = conv(
+            context, model, operators, zero, bottleneck,
+            "patch_transformer.embedding_convPxP.weight",
+            "patch_transformer.embedding_convPxP.bias", 1, 0);
+        const std::uint32_t spatial = embedded.height * embedded.width;
+        const std::uint32_t token_count = spatial + 1;
+        const VkDeviceSize token_bytes =
+            std::uint64_t(token_count) * 128 * sizeof(float);
+        VulkanBuffer tokens = context.create_device_buffer(token_bytes);
+        operators.router_tokens(tokens, embedded.buffer, spatial, 128);
+        for (std::uint32_t layer = 0; layer < 4; ++layer) {
+            const std::string base =
+                "patch_transformer.transformer_encoder.layers." +
+                std::to_string(layer);
+            VulkanBuffer qkv =
+                context.create_device_buffer(token_bytes * 3);
+            operators.linear(
+                qkv, tokens,
+                tensor(model, base + ".self_attn.in_proj_weight"),
+                tensor(model, base + ".self_attn.in_proj_bias"),
+                token_count, 128, 384, false);
+            VulkanBuffer query = context.create_device_buffer(token_bytes);
+            VulkanBuffer key = context.create_device_buffer(token_bytes);
+            VulkanBuffer values = context.create_device_buffer(token_bytes);
+            VulkanBuffer attended = context.create_device_buffer(token_bytes);
+            operators.qkv_split(
+                query, key, values, qkv, token_count, 128);
+            operators.attention_separate(
+                attended, query, key, values,
+                token_count, token_count, 4, 32);
+            VulkanBuffer projected = context.create_device_buffer(token_bytes);
+            operators.linear(
+                projected, attended,
+                tensor(model, base + ".self_attn.out_proj.weight"),
+                tensor(model, base + ".self_attn.out_proj.bias"),
+                token_count, 128, 128, false);
+            operators.add(
+                projected, projected, tokens,
+                token_count * 128);
+            VulkanBuffer normalized =
+                context.create_device_buffer(token_bytes);
+            operators.layer_norm(
+                normalized, projected,
+                tensor(model, base + ".norm1.weight"),
+                tensor(model, base + ".norm1.bias"),
+                token_count, 128, 1.0e-5f);
+            VulkanBuffer hidden = context.create_device_buffer(
+                std::uint64_t(token_count) * 1024 * sizeof(float));
+            operators.linear(
+                hidden, normalized,
+                tensor(model, base + ".linear1.weight"),
+                tensor(model, base + ".linear1.bias"),
+                token_count, 128, 1024, false);
+            operators.relu(hidden, hidden, token_count * 1024);
+            VulkanBuffer feed_forward =
+                context.create_device_buffer(token_bytes);
+            operators.linear(
+                feed_forward, hidden,
+                tensor(model, base + ".linear2.weight"),
+                tensor(model, base + ".linear2.bias"),
+                token_count, 1024, 128, false);
+            operators.add(
+                feed_forward, feed_forward, normalized,
+                token_count * 128);
+            VulkanBuffer next = context.create_device_buffer(token_bytes);
+            operators.layer_norm(
+                next, feed_forward,
+                tensor(model, base + ".norm2.weight"),
+                tensor(model, base + ".norm2.bias"),
+                token_count, 128, 1.0e-5f);
+            tokens = std::move(next);
+        }
+        VulkanBuffer hidden =
+            context.create_device_buffer(128 * sizeof(float));
         operators.linear(
-            qkv, tokens,
-            tensor(model, base + ".self_attn.in_proj_weight"),
-            tensor(model, base + ".self_attn.in_proj_bias"),
-            token_count, 128, 384, false);
-        VulkanBuffer query = context.create_device_buffer(token_bytes);
-        VulkanBuffer key = context.create_device_buffer(token_bytes);
-        VulkanBuffer values = context.create_device_buffer(token_bytes);
-        VulkanBuffer attended = context.create_device_buffer(token_bytes);
-        operators.qkv_split(
-            query, key, values, qkv, token_count, 128);
-        operators.attention_separate(
-            attended, query, key, values,
-            token_count, token_count, 4, 32);
-        VulkanBuffer projected = context.create_device_buffer(token_bytes);
+            hidden, tokens,
+            tensor(model, "mlp_classifier.0.weight"),
+            tensor(model, "mlp_classifier.0.bias"),
+            1, 128, 128, false);
+        operators.relu(hidden, hidden, 128);
+        logits = context.create_device_buffer(2 * sizeof(float));
         operators.linear(
-            projected, attended,
-            tensor(model, base + ".self_attn.out_proj.weight"),
-            tensor(model, base + ".self_attn.out_proj.bias"),
-            token_count, 128, 128, false);
-        operators.add(
-            projected, projected, tokens,
-            token_count * 128);
-        VulkanBuffer normalized = context.create_device_buffer(token_bytes);
-        operators.layer_norm(
-            normalized, projected,
-            tensor(model, base + ".norm1.weight"),
-            tensor(model, base + ".norm1.bias"),
-            token_count, 128, 1.0e-5f);
-        VulkanBuffer hidden = context.create_device_buffer(
-            std::uint64_t(token_count) * 1024 * sizeof(float));
-        operators.linear(
-            hidden, normalized,
-            tensor(model, base + ".linear1.weight"),
-            tensor(model, base + ".linear1.bias"),
-            token_count, 128, 1024, false);
-        operators.relu(hidden, hidden, token_count * 1024);
-        VulkanBuffer feed_forward =
-            context.create_device_buffer(token_bytes);
-        operators.linear(
-            feed_forward, hidden,
-            tensor(model, base + ".linear2.weight"),
-            tensor(model, base + ".linear2.bias"),
-            token_count, 1024, 128, false);
-        operators.add(
-            feed_forward, feed_forward, normalized,
-            token_count * 128);
-        VulkanBuffer next = context.create_device_buffer(token_bytes);
-        operators.layer_norm(
-            next, feed_forward,
-            tensor(model, base + ".norm2.weight"),
-            tensor(model, base + ".norm2.bias"),
-            token_count, 128, 1.0e-5f);
-        tokens = std::move(next);
-    }
-    VulkanBuffer hidden = context.create_device_buffer(128 * sizeof(float));
-    operators.linear(
-        hidden, tokens,
-        tensor(model, "mlp_classifier.0.weight"),
-        tensor(model, "mlp_classifier.0.bias"),
-        1, 128, 128, false);
-    operators.relu(hidden, hidden, 128);
-    VulkanBuffer logits = context.create_device_buffer(2 * sizeof(float));
-    operators.linear(
-        logits, hidden,
-        tensor(model, "mlp_classifier.2.weight"),
-        tensor(model, "mlp_classifier.2.bias"),
-        1, 128, 2, false);
+            logits, hidden,
+            tensor(model, "mlp_classifier.2.weight"),
+            tensor(model, "mlp_classifier.2.bias"),
+            1, 128, 2, false);
+    });
     float host_logits[2] = {};
     context.download(logits, host_logits, sizeof(host_logits));
     return host_logits[0] >= host_logits[1] ? "nyu" : "kitti";
@@ -412,6 +419,8 @@ GpuFeature metric(
     const std::string distribution_base = dual
         ? "conditional_log_binomial." + domain
         : "conditional_log_binomial";
+    GpuFeature depth;
+    context.batch([&] {
     GpuFeature b_previous = conv(
         context, model, operators, zero, bottleneck,
         seed_base + "._net.0.weight",
@@ -521,13 +530,14 @@ GpuFeature metric(
         static_cast<std::uint32_t>(elements(parameters)));
     centers = resize(
         context, operators, centers, last.height, last.width);
-    GpuFeature depth{
+    depth = GpuFeature{
         context.create_device_buffer(
             std::uint64_t(last.height) * last.width * sizeof(float)),
         1, last.height, last.width};
     operators.distribution_depth(
         depth.buffer, parameters.buffer, centers.buffer,
         last.height * last.width);
+    });
     return depth;
 }
 
@@ -539,11 +549,19 @@ GpuFeature full_graph_gpu(
     VulkanBuffer zero = context.create_device_buffer(1024 * sizeof(float));
     const std::vector<float> zeros(1024, 0.0f);
     context.upload(zero, zeros.data(), zeros.size() * sizeof(float));
-    return metric(
-        context, model, operators, zero,
-        decode(
-            context, model, operators, zero,
-            std::move(encoded)));
+    GpuDecoderOutput decoded = decode(
+        context, model, operators, zero, std::move(encoded));
+    GpuFeature result;
+    if (model.variant() == Variant::nk) {
+        result = metric(
+            context, model, operators, zero, std::move(decoded));
+    } else {
+        context.batch([&] {
+            result = metric(
+                context, model, operators, zero, std::move(decoded));
+        });
+    }
+    return result;
 }
 
 }  // namespace zoe_native

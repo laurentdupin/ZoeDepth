@@ -112,3 +112,16 @@ CPU-only DLL builds pass the C ABI smoke test.
 The current tensor ABI still prepares and uploads planar RGB on the host and
 downloads depth for the caller. It does not advertise external-image import,
 GPU-resident output leases, or zero-copy integration yet.
+
+## First performance pass
+
+Decoder and metric operations now use bounded Vulkan command batches.
+Graph-internal buffer snapshots are recorded in the active command buffer with
+explicit transfer/compute barriers, avoiding a queue submission and fence wait
+for every snapshot. The NK routing transformer is also one bounded submission;
+its two-logit domain decision remains the only mid-graph host read.
+
+On the Radeon RX 9070, the N 64x64 fixture improved from a `76.0 ms`
+steady-state median to `63.8-66.1 ms` across three 21-iteration runs
+(`13-16%`). All 18 variant/size/adapter correctness canaries retained the
+results above.
