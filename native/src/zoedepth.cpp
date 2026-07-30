@@ -55,7 +55,7 @@ uint32_t ZOEDEPTH_CALL zoedepth_abi_version(void) {
 }
 
 const char* ZOEDEPTH_CALL zoedepth_version_string(void) {
-    return "0.2.0-zoed-n-k-cpu";
+    return "0.3.0-zoed-n-k-nk-cpu";
 }
 
 const char* ZOEDEPTH_CALL zoedepth_last_error(void) {
@@ -78,17 +78,21 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_create(
             "model path is empty");
     }
     if (variant != ZOEDEPTH_VARIANT_N &&
-        variant != ZOEDEPTH_VARIANT_K) {
+        variant != ZOEDEPTH_VARIANT_K &&
+        variant != ZOEDEPTH_VARIANT_NK) {
         return fail(
-            ZOEDEPTH_STATUS_UNSUPPORTED,
-            "ZoeD-M12-NK is not implemented");
+            ZOEDEPTH_STATUS_INVALID_ARGUMENT,
+            "invalid ZoeDepth variant");
     }
     return protect([&] {
         auto result = std::make_unique<zoedepth_context>();
         result->model = std::make_unique<zoe_native::ModelFile>(
-            path, variant == ZOEDEPTH_VARIANT_K
+            path,
+            variant == ZOEDEPTH_VARIANT_K
                 ? zoe_native::Variant::k
-                : zoe_native::Variant::n);
+                : variant == ZOEDEPTH_VARIANT_NK
+                    ? zoe_native::Variant::nk
+                    : zoe_native::Variant::n);
         *context = result.release();
     });
 }

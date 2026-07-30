@@ -1,4 +1,4 @@
-"""Generate deterministic ZoeD-N BEiT encoder fixtures."""
+"""Generate deterministic ZoeDepth BEiT encoder fixtures."""
 
 from __future__ import annotations
 
@@ -43,13 +43,14 @@ def build_model(
     elif variant == "nk":
         from zoedepth.models.zoedepth_nk.zoedepth_nk_v1 import (
             ZoeDepthNK)
+        from zoedepth.utils.easydict import EasyDict
         model = ZoeDepthNK(
             core,
             bin_conf=[
-                {"name": "nyu", "n_bins": 64,
-                 "min_depth": 1e-3, "max_depth": 10.0},
-                {"name": "kitti", "n_bins": 64,
-                 "min_depth": 1e-3, "max_depth": 80.0},
+                EasyDict({"name": "nyu", "n_bins": 64,
+                          "min_depth": 1e-3, "max_depth": 10.0}),
+                EasyDict({"name": "kitti", "n_bins": 64,
+                          "min_depth": 1e-3, "max_depth": 80.0}),
             ],
             bin_embedding_dim=128, bin_centers_type="softplus",
             n_attractors=[16, 8, 4, 1],

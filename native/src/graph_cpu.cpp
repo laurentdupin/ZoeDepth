@@ -307,6 +307,316 @@ Image projector(
         base + ".2.bias", 1, 0);
 }
 
+std::vector<float> linear_vector(
+    const ModelFile& model,
+    const std::vector<float>& input,
+    const std::string& weight_name,
+    const std::string& bias_name) {
+    const TensorView& weight =
+        checked_tensor(model, weight_name, 2);
+    const TensorView& bias =
+        checked_tensor(model, bias_name, 1);
+    if (weight.dimensions[1] != input.size() ||
+        bias.dimensions[0] != weight.dimensions[0]) {
+        throw std::runtime_error(
+            "ZoeDepth linear shape mismatch: " + weight_name);
+    }
+    std::vector<float> output(
+        static_cast<std::size_t>(weight.dimensions[0]));
+    for (std::uint64_t out = 0;
+         out < weight.dimensions[0]; ++out) {
+        float value = bias.data[out];
+        for (std::uint64_t in = 0;
+             in < weight.dimensions[1]; ++in) {
+            value += input[static_cast<std::size_t>(in)] *
+                weight.data[out * weight.dimensions[1] + in];
+        }
+        output[static_cast<std::size_t>(out)] = value;
+    }
+    return output;
+}
+
+void layer_norm_tokens(
+    const ModelFile& model,
+    std::vector<float>& tokens,
+    std::uint32_t token_count,
+    const std::string& weight_name,
+    const std::string& bias_name) {
+    constexpr std::uint32_t features = 128;
+    constexpr float epsilon = 1.0e-5f;
+    const TensorView& weight =
+        checked_tensor(model, weight_name, 1);
+    const TensorView& bias =
+        checked_tensor(model, bias_name, 1);
+    if (weight.dimensions[0] != features ||
+        bias.dimensions[0] != features ||
+        tokens.size() !=
+            std::uint64_t(token_count) * features) {
+        throw std::runtime_error(
+            "ZoeDepth router layer norm shape mismatch");
+    }
+    for (std::uint32_t token = 0;
+         token < token_count; ++token) {
+        float mean = 0.0f;
+        for (std::uint32_t feature = 0;
+             feature < features; ++feature) {
+            mean += tokens[
+                std::uint64_t(token) * features + feature];
+        }
+        mean /= static_cast<float>(features);
+        float variance = 0.0f;
+        for (std::uint32_t feature = 0;
+             feature < features; ++feature) {
+            const float centered = tokens[
+                std::uint64_t(token) * features + feature] - mean;
+            variance += centered * centered;
+        }
+        variance /= static_cast<float>(features);
+        const float inverse =
+            1.0f / std::sqrt(variance + epsilon);
+        for (std::uint32_t feature = 0;
+             feature < features; ++feature) {
+            const std::uint64_t index =
+                std::uint64_t(token) * features + feature;
+            tokens[index] =
+                (tokens[index] - mean) * inverse *
+                    weight.data[feature] +
+                bias.data[feature];
+        }
+    }
+}
+
+std::string route_nk(
+    const ModelFile& model,
+    const Image& bottleneck) {
+    constexpr std::uint32_t features = 128;
+    constexpr std::uint32_t heads = 4;
+    constexpr std::uint32_t head_features = features / heads;
+    Image embedded = conv2d(
+        model, bottleneck,
+        "patch_transformer.embedding_convPxP.weight",
+        "patch_transformer.embedding_convPxP.bias", 1, 0);
+    if (embedded.channels != features) {
+        throw std::runtime_error(
+            "unexpected ZoeDepth NK router embedding");
+    }
+    const std::uint32_t token_count =
+        embedded.height * embedded.width + 1;
+    std::vector<float> tokens(
+        std::uint64_t(token_count) * features, 0.0f);
+    constexpr float log_10000 = 9.210340371976184f;
+    for (std::uint32_t token = 0;
+         token < token_count; ++token) {
+        for (std::uint32_t pair = 0;
+             pair < features / 2; ++pair) {
+            const float angle = static_cast<float>(token) *
+                std::exp(
+                    static_cast<float>(pair * 2) *
+                    (-log_10000 / static_cast<float>(features)));
+            tokens[std::uint64_t(token) * features + pair] =
+                std::sin(angle);
+            tokens[std::uint64_t(token) * features +
+                features / 2 + pair] = std::cos(angle);
+        }
+    }
+    const std::uint64_t embedded_plane =
+        std::uint64_t(embedded.height) * embedded.width;
+    for (std::uint32_t token = 1;
+         token < token_count; ++token) {
+        const std::uint64_t pixel = token - 1;
+        for (std::uint32_t feature = 0;
+             feature < features; ++feature) {
+            tokens[std::uint64_t(token) * features + feature] +=
+                embedded.values[
+                    std::uint64_t(feature) * embedded_plane +
+                    pixel];
+        }
+    }
+
+    for (std::uint32_t layer = 0; layer < 4; ++layer) {
+        const std::string base =
+            "patch_transformer.transformer_encoder.layers." +
+            std::to_string(layer);
+        const TensorView& in_weight = checked_tensor(
+            model, base + ".self_attn.in_proj_weight", 2);
+        const TensorView& in_bias = checked_tensor(
+            model, base + ".self_attn.in_proj_bias", 1);
+        if (in_weight.dimensions[0] != 3 * features ||
+            in_weight.dimensions[1] != features ||
+            in_bias.dimensions[0] != 3 * features) {
+            throw std::runtime_error(
+                "unexpected ZoeDepth NK attention projection");
+        }
+        std::vector<float> qkv(
+            std::uint64_t(token_count) * 3 * features);
+        for (std::uint32_t token = 0;
+             token < token_count; ++token) {
+            for (std::uint32_t out = 0;
+                 out < 3 * features; ++out) {
+                float value = in_bias.data[out];
+                for (std::uint32_t in = 0;
+                     in < features; ++in) {
+                    value += tokens[
+                        std::uint64_t(token) * features + in] *
+                        in_weight.data[
+                            std::uint64_t(out) * features + in];
+                }
+                qkv[
+                    std::uint64_t(token) * 3 * features + out] =
+                    value;
+            }
+        }
+        std::vector<float> attended(
+            std::uint64_t(token_count) * features);
+        std::vector<float> scores(token_count);
+        const float scale =
+            1.0f / std::sqrt(static_cast<float>(head_features));
+        for (std::uint32_t query = 0;
+             query < token_count; ++query) {
+            for (std::uint32_t head = 0;
+                 head < heads; ++head) {
+                float maximum =
+                    -std::numeric_limits<float>::infinity();
+                for (std::uint32_t key = 0;
+                     key < token_count; ++key) {
+                    float score = 0.0f;
+                    for (std::uint32_t feature = 0;
+                         feature < head_features; ++feature) {
+                        const std::uint32_t offset =
+                            head * head_features + feature;
+                        score += qkv[
+                            std::uint64_t(query) *
+                                3 * features +
+                            offset] *
+                            qkv[
+                                std::uint64_t(key) *
+                                    3 * features +
+                                features + offset];
+                    }
+                    scores[key] = score * scale;
+                    maximum = std::max(maximum, scores[key]);
+                }
+                float denominator = 0.0f;
+                for (float& score : scores) {
+                    score = std::exp(score - maximum);
+                    denominator += score;
+                }
+                for (std::uint32_t feature = 0;
+                     feature < head_features; ++feature) {
+                    const std::uint32_t offset =
+                        head * head_features + feature;
+                    float value = 0.0f;
+                    for (std::uint32_t key = 0;
+                         key < token_count; ++key) {
+                        value += scores[key] / denominator *
+                            qkv[
+                                std::uint64_t(key) *
+                                    3 * features +
+                                2 * features + offset];
+                    }
+                    attended[
+                        std::uint64_t(query) * features + offset] =
+                        value;
+                }
+            }
+        }
+        const TensorView& out_weight = checked_tensor(
+            model, base + ".self_attn.out_proj.weight", 2);
+        const TensorView& out_bias = checked_tensor(
+            model, base + ".self_attn.out_proj.bias", 1);
+        std::vector<float> attention_output(tokens.size());
+        for (std::uint32_t token = 0;
+             token < token_count; ++token) {
+            for (std::uint32_t out = 0;
+                 out < features; ++out) {
+                float value = out_bias.data[out];
+                for (std::uint32_t in = 0;
+                     in < features; ++in) {
+                    value += attended[
+                        std::uint64_t(token) * features + in] *
+                        out_weight.data[
+                            std::uint64_t(out) * features + in];
+                }
+                attention_output[
+                    std::uint64_t(token) * features + out] =
+                    tokens[
+                        std::uint64_t(token) * features + out] +
+                    value;
+            }
+        }
+        layer_norm_tokens(
+            model, attention_output, token_count,
+            base + ".norm1.weight", base + ".norm1.bias");
+
+        const TensorView& linear1_weight = checked_tensor(
+            model, base + ".linear1.weight", 2);
+        const TensorView& linear1_bias = checked_tensor(
+            model, base + ".linear1.bias", 1);
+        const TensorView& linear2_weight = checked_tensor(
+            model, base + ".linear2.weight", 2);
+        const TensorView& linear2_bias = checked_tensor(
+            model, base + ".linear2.bias", 1);
+        if (linear1_weight.dimensions[0] != 1024 ||
+            linear1_weight.dimensions[1] != features ||
+            linear2_weight.dimensions[0] != features ||
+            linear2_weight.dimensions[1] != 1024) {
+            throw std::runtime_error(
+                "unexpected ZoeDepth NK feed-forward shape");
+        }
+        std::vector<float> feed_forward(tokens.size());
+        std::vector<float> hidden(1024);
+        for (std::uint32_t token = 0;
+             token < token_count; ++token) {
+            for (std::uint32_t out = 0; out < 1024; ++out) {
+                float value = linear1_bias.data[out];
+                for (std::uint32_t in = 0;
+                     in < features; ++in) {
+                    value += attention_output[
+                        std::uint64_t(token) * features + in] *
+                        linear1_weight.data[
+                            std::uint64_t(out) * features + in];
+                }
+                hidden[out] = std::max(value, 0.0f);
+            }
+            for (std::uint32_t out = 0;
+                 out < features; ++out) {
+                float value = linear2_bias.data[out];
+                for (std::uint32_t in = 0; in < 1024; ++in) {
+                    value += hidden[in] *
+                        linear2_weight.data[
+                            std::uint64_t(out) * 1024 + in];
+                }
+                feed_forward[
+                    std::uint64_t(token) * features + out] =
+                    attention_output[
+                        std::uint64_t(token) * features + out] +
+                    value;
+            }
+        }
+        layer_norm_tokens(
+            model, feed_forward, token_count,
+            base + ".norm2.weight", base + ".norm2.bias");
+        tokens = std::move(feed_forward);
+    }
+
+    std::vector<float> class_token(
+        tokens.begin(), tokens.begin() + features);
+    class_token = linear_vector(
+        model, class_token,
+        "mlp_classifier.0.weight", "mlp_classifier.0.bias");
+    for (float& value : class_token) {
+        value = std::max(value, 0.0f);
+    }
+    const std::vector<float> logits = linear_vector(
+        model, class_token,
+        "mlp_classifier.2.weight", "mlp_classifier.2.bias");
+    if (logits.size() != 2) {
+        throw std::runtime_error(
+            "unexpected ZoeDepth NK classifier output");
+    }
+    return logits[0] >= logits[1] ? "nyu" : "kitti";
+}
+
 Image residual_unit(
     const ModelFile& model,
     const Image& input,
@@ -492,23 +802,32 @@ Image metric_depth_cpu(
     }
     const bool normed =
         model.derivation().variant == Variant::k;
-    if (model.derivation().variant == Variant::nk) {
-        throw std::runtime_error(
-            "ZoeD-NK metric routing is not implemented");
-    }
+    const bool dual_head =
+        model.derivation().variant == Variant::nk;
     Image bottleneck = conv2d(
         model, decoded.bottleneck,
         "conv2.weight", "conv2.bias", 1, 0);
+    const std::string domain =
+        dual_head ? route_nk(model, bottleneck) : "";
+    const std::string seed_base = dual_head
+        ? "seed_bin_regressors." + domain
+        : "seed_bin_regressor";
+    const std::string attractor_base = dual_head
+        ? "attractors." + domain
+        : "attractors";
+    const std::string distribution_base = dual_head
+        ? "conditional_log_binomial." + domain
+        : "conditional_log_binomial";
 
     Image b_previous = conv2d(
         model, bottleneck,
-        "seed_bin_regressor._net.0.weight",
-        "seed_bin_regressor._net.0.bias", 1, 0);
+        seed_base + "._net.0.weight",
+        seed_base + "._net.0.bias", 1, 0);
     relu(b_previous);
     b_previous = conv2d(
         model, b_previous,
-        "seed_bin_regressor._net.2.weight",
-        "seed_bin_regressor._net.2.bias", 1, 0);
+        seed_base + "._net.2.weight",
+        seed_base + "._net.2.bias", 1, 0);
     if (normed) {
         relu(b_previous);
         const std::uint64_t pixels =
@@ -543,7 +862,10 @@ Image metric_depth_cpu(
 
     Image centers;
     Image embedding;
-    const std::uint32_t attractor_counts[4] = {16, 8, 4, 1};
+    const std::uint32_t attractor_counts[4] = {
+        16, dual_head ? 16u : 8u,
+        dual_head ? 16u : 4u,
+        dual_head ? 16u : 1u};
     for (std::uint32_t level = 0; level < 4; ++level) {
         embedding = projector(
             model, decoded.refinement_blocks[level],
@@ -554,17 +876,17 @@ Image metric_depth_cpu(
             embedding, previous_embedding_resized);
         Image attractors = conv2d(
             model, attractor_input,
-            "attractors." + std::to_string(level) +
+            attractor_base + "." + std::to_string(level) +
                 "._net.0.weight",
-            "attractors." + std::to_string(level) +
+            attractor_base + "." + std::to_string(level) +
                 "._net.0.bias",
             1, 0);
         relu(attractors);
         attractors = conv2d(
             model, attractors,
-            "attractors." + std::to_string(level) +
+            attractor_base + "." + std::to_string(level) +
                 "._net.2.weight",
-            "attractors." + std::to_string(level) +
+            attractor_base + "." + std::to_string(level) +
                 "._net.2.bias",
             1, 0);
         if (normed) {
@@ -645,25 +967,28 @@ Image metric_depth_cpu(
         previous_embedding = embedding;
     }
 
-    Image relative = resize_align_corners(
-        decoded.relative_depth,
-        decoded.out_conv.height,
-        decoded.out_conv.width);
-    Image last = concatenate(decoded.out_conv, relative);
+    Image last = decoded.out_conv;
+    if (!dual_head) {
+        Image relative = resize_align_corners(
+            decoded.relative_depth,
+            decoded.out_conv.height,
+            decoded.out_conv.width);
+        last = concatenate(decoded.out_conv, relative);
+    }
     embedding = resize_align_corners(
         embedding, last.height, last.width);
     Image probability_parameters = concatenate(last, embedding);
     probability_parameters = conv2d(
         model, probability_parameters,
-        "conditional_log_binomial.mlp.0.weight",
-        "conditional_log_binomial.mlp.0.bias", 1, 0);
+        distribution_base + ".mlp.0.weight",
+        distribution_base + ".mlp.0.bias", 1, 0);
     for (float& value : probability_parameters.values) {
         value = gelu(value);
     }
     probability_parameters = conv2d(
         model, probability_parameters,
-        "conditional_log_binomial.mlp.2.weight",
-        "conditional_log_binomial.mlp.2.bias", 1, 0);
+        distribution_base + ".mlp.2.weight",
+        distribution_base + ".mlp.2.bias", 1, 0);
     softplus(probability_parameters);
     if (probability_parameters.channels != 4 ||
         centers.channels != 64) {

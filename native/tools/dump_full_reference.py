@@ -1,4 +1,4 @@
-"""Generate deterministic full ZoeD-N depth fixtures and decoder taps."""
+"""Generate deterministic full ZoeDepth fixtures and decoder taps."""
 
 from __future__ import annotations
 
