@@ -113,6 +113,24 @@ The current tensor ABI still prepares and uploads planar RGB on the host and
 downloads depth for the caller. It does not advertise external-image import,
 GPU-resident output leases, or zero-copy integration yet.
 
+## Complete InferBridge image path
+
+ABI version 3 adds `zoedepth_infer_bgra8_f32`. It reproduces the existing
+InferBridge Python worker's `infer_pil()` defaults: BGRA-to-RGB conversion,
+reflection padding, MiDaS minimal aspect-preserving resize (including
+multiple-of-32 rounding), horizontal-flip augmentation, bicubic output resize,
+and cropping back to the source dimensions. The selected `model_size` is the
+worker's `Size` parameter. The existing already-prepared planar tensor entry
+point remains unchanged.
+
+A deterministic non-square 53x41 BGRA canary at network size 64 compared the
+complete Python CPU image path with Vulkan on the RX 9070, GTX 1080, and RX
+6700 XT. Mean relative error was `0.2806%`, maximum relative error `0.3052%`,
+and maximum absolute error `0.003645` on all three. This is within the already
+measured tensor-graph drift.
+`native/tools/validate_image_path.py` reproduces the check from the canonical
+checkpoint and its derived native representation.
+
 ## First performance pass
 
 Decoder and metric operations now use bounded Vulkan command batches.

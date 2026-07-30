@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ZOEDEPTH_ABI_VERSION 2u
+#define ZOEDEPTH_ABI_VERSION 3u
 
 typedef struct zoedepth_context zoedepth_context;
 
@@ -65,6 +65,26 @@ zoedepth_infer_rgb_f32(
     const float* rgb_chw,
     int32_t width,
     int32_t height,
+    float* depth_hw,
+    uint64_t depth_elements);
+
+/*
+ * Executes the complete image path used by ZoeDepth infer_pil():
+ * uint8 BGRA -> RGB/[0,1], reflection padding, MiDaS minimal
+ * aspect-preserving resize, horizontal-flip augmentation, bicubic
+ * resize/crop, and metric FP32 depth at the original dimensions.
+ * model_size is the square Size parameter used to construct the Python
+ * model and must be a positive multiple of 32. bgra_stride_bytes may be
+ * larger than width * 4.
+ */
+ZOEDEPTH_API zoedepth_status ZOEDEPTH_CALL
+zoedepth_infer_bgra8_f32(
+    zoedepth_context* context,
+    const uint8_t* bgra,
+    uint64_t bgra_stride_bytes,
+    int32_t width,
+    int32_t height,
+    int32_t model_size,
     float* depth_hw,
     uint64_t depth_elements);
 

@@ -18,6 +18,10 @@ int main(void) {
             0, ZOEDEPTH_VARIANT_N, 0, &context) ==
         ZOEDEPTH_STATUS_INVALID_ARGUMENT);
     assert(context == 0);
+    assert(
+        zoedepth_infer_bgra8_f32(
+            0, 0, 0, 0, 0, 0, 0, 0) ==
+        ZOEDEPTH_STATUS_INVALID_ARGUMENT);
     zoedepth_destroy(0);
     return 0;
 }
