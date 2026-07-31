@@ -1,3 +1,4 @@
+
 #include "external_gpu.h"
 
 #include "gpu_io.h"
@@ -29,7 +30,7 @@ namespace {
 
 #if defined(_WIN32)
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kGpuSlotCount = 3u;
+constexpr std::uint32_t kMaxInFlightJobs = 3u;
 
 void check_hresult(HRESULT result, const char* operation) {
     if (FAILED(result)) {
@@ -66,184 +67,38 @@ ComPtr<ID3D12Device> matching_d3d12_device(std::uint64_t luid) {
     return {};
 }
 
-struct SharedOutput {
+void validate_texture(ID3D12Device* device, std::uintptr_t handle,
+    std::uint32_t width, std::uint32_t height, DXGI_FORMAT format,
+    const char* operation) {
     ComPtr<ID3D12Resource> resource;
-    ComPtr<ID3D12Fence> fence;
-    HANDLE resource_handle = nullptr;
-    HANDLE fence_handle = nullptr;
-    SharedOutput() = default;
-    SharedOutput(const SharedOutput&) = delete;
-    SharedOutput& operator=(const SharedOutput&) = delete;
-    SharedOutput(SharedOutput&& other) noexcept
-        : resource(std::move(other.resource)), fence(std::move(other.fence)),
-          resource_handle(std::exchange(other.resource_handle, nullptr)),
-          fence_handle(std::exchange(other.fence_handle, nullptr)) {}
-    SharedOutput& operator=(SharedOutput&& other) noexcept {
-        if (this != &other) {
-            if (resource_handle != nullptr) CloseHandle(resource_handle);
-            if (fence_handle != nullptr) CloseHandle(fence_handle);
-            resource = std::move(other.resource);
-            fence = std::move(other.fence);
-            resource_handle = std::exchange(other.resource_handle, nullptr);
-            fence_handle = std::exchange(other.fence_handle, nullptr);
-        }
-        return *this;
-    }
-    ~SharedOutput() {
-        if (resource_handle != nullptr) CloseHandle(resource_handle);
-        if (fence_handle != nullptr) CloseHandle(fence_handle);
-    }
-};
-
-struct GpuSlot {
-    std::atomic<bool> occupied{false};
-    SharedOutput shared;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    std::uint64_t fence_value = 0;
-};
-
-SharedOutput create_shared_output(
-    ID3D12Device* device,
-    std::uint32_t width,
-    std::uint32_t height) {
-    const D3D12_HEAP_PROPERTIES heap{
-        D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-        D3D12_MEMORY_POOL_UNKNOWN, 1, 1};
-    const D3D12_RESOURCE_DESC description{
-        D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, width, height, 1, 1,
-        DXGI_FORMAT_R32_FLOAT, {1, 0}, D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
-    SharedOutput output;
-    check_hresult(
-        device->CreateCommittedResource(
-            &heap, D3D12_HEAP_FLAG_SHARED, &description,
-            D3D12_RESOURCE_STATE_COMMON, nullptr,
-            IID_PPV_ARGS(&output.resource)),
-        "CreateCommittedResource(ZoeDepth output)");
-    check_hresult(
-        device->CreateFence(
-            0, D3D12_FENCE_FLAG_SHARED,
-            IID_PPV_ARGS(&output.fence)),
-        "CreateFence(ZoeDepth output)");
-    check_hresult(
-        device->CreateSharedHandle(
-            output.resource.Get(), nullptr, GENERIC_ALL, nullptr,
-            &output.resource_handle),
-        "CreateSharedHandle(ZoeDepth output)");
-    check_hresult(
-        device->CreateSharedHandle(
-            output.fence.Get(), nullptr, GENERIC_ALL, nullptr,
-            &output.fence_handle),
-        "CreateSharedHandle(ZoeDepth fence)");
-    return output;
+    check_hresult(device->OpenSharedHandle(
+        reinterpret_cast<HANDLE>(handle), IID_PPV_ARGS(&resource)), operation);
+    const auto d = resource->GetDesc();
+    if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        d.Width != width || d.Height != height || d.DepthOrArraySize != 1u ||
+        d.MipLevels != 1u || d.SampleDesc.Count != 1u || d.Format != format)
+        throw std::invalid_argument("ZoeDepth shared texture descriptor mismatch");
 }
-
-void validate_input(
-    ID3D12Device* device,
-    std::uintptr_t handle,
-    std::uint32_t width,
-    std::uint32_t height) {
-    ComPtr<ID3D12Resource> resource;
-    check_hresult(
-        device->OpenSharedHandle(
-            reinterpret_cast<HANDLE>(handle),
-            IID_PPV_ARGS(&resource)),
-        "OpenSharedHandle(ZoeDepth input)");
-    const D3D12_RESOURCE_DESC description = resource->GetDesc();
-    if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-        description.Width != width || description.Height != height ||
-        description.DepthOrArraySize != 1u || description.MipLevels != 1u ||
-        description.SampleDesc.Count != 1u ||
-        description.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
-        throw std::invalid_argument(
-            "shared ZoeDepth input is not the declared BGRA8 texture");
-    }
-}
-
-std::shared_ptr<GpuSlot> acquire_slot(
-    const std::array<std::shared_ptr<GpuSlot>, kGpuSlotCount>& slots,
-    std::atomic<std::uint32_t>& next) {
-    const std::uint32_t first = next.fetch_add(1u) % kGpuSlotCount;
-    for (std::uint32_t offset = 0; offset < kGpuSlotCount; ++offset) {
-        const auto& slot = slots[(first + offset) % kGpuSlotCount];
-        bool expected = false;
-        if (slot->occupied.compare_exchange_strong(expected, true)) return slot;
-    }
-    throw GpuSlotsExhausted();
-}
-
-VulkanImage prepare_output(
-    GpuSlot& slot,
-    ID3D12Device* device,
-    VulkanContext& context,
-    std::uint32_t width,
-    std::uint32_t height) {
-    if (slot.shared.resource == nullptr || slot.width != width ||
-        slot.height != height) {
-        slot.shared = SharedOutput{};
-        slot.width = slot.height = 0u;
-        slot.fence_value = 0u;
-        slot.shared = create_shared_output(device, width, height);
-        slot.width = width;
-        slot.height = height;
-    }
-    return context.import_d3d12_image(
-        slot.shared.resource_handle, width, height,
-        VK_FORMAT_R32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-}
-#endif
-
-class ExternalGpuImpl;
-
-#if defined(_WIN32)
 class ExternalJobImpl final : public ExternalJob {
 public:
-    ExternalJobImpl(
-        std::shared_ptr<ExternalGpu> owner,
-        std::shared_ptr<GpuSlot> slot,
-        VulkanImage input,
-        VulkanImage output,
-        VulkanSubmission submission,
-        const ExternalTextureRequest& request,
-        std::uint64_t fence_value)
-        : owner_(std::move(owner)), slot_(std::move(slot)),
-          input_(std::move(input)), output_(std::move(output)),
-          submission_(std::move(submission)), request_(request),
-          fence_value_(fence_value) {}
+    ExternalJobImpl(std::shared_ptr<ExternalGpu> owner, VulkanImage input,
+        VulkanImage output, VulkanSubmission submission)
+        : owner_(std::move(owner)), input_(std::move(input)),
+          output_(std::move(output)), submission_(std::move(submission)) {}
     ~ExternalJobImpl() override {
         try { submission_.wait(); } catch (...) {}
-        submission_ = VulkanSubmission{};
-        output_ = VulkanImage{};
-        input_ = VulkanImage{};
-        slot_->occupied.store(false);
+        submission_ = {}; output_ = {}; input_ = {};
     }
     ExternalJobState state() const override {
         if (cancelled_.load()) return ExternalJobState::cancelled;
-        return submission_.ready()
-            ? ExternalJobState::complete
-            : ExternalJobState::running;
+        return submission_.ready() ? ExternalJobState::complete :
+                                     ExternalJobState::running;
     }
     void cancel() override { cancelled_.store(true); }
-    ExternalTextureOutput output() const override {
-        if (cancelled_.load()) {
-            throw std::runtime_error("ZoeDepth GPU job was cancelled");
-        }
-        return {
-            reinterpret_cast<std::uintptr_t>(slot_->shared.resource_handle),
-            request_.width, request_.height,
-            reinterpret_cast<std::uintptr_t>(slot_->shared.fence_handle),
-            fence_value_, request_.source_frame_id, request_.timestamp_ns};
-    }
 private:
     std::shared_ptr<ExternalGpu> owner_;
-    std::shared_ptr<GpuSlot> slot_;
-    VulkanImage input_;
-    VulkanImage output_;
+    VulkanImage input_, output_;
     VulkanSubmission submission_;
-    ExternalTextureRequest request_{};
-    std::uint64_t fence_value_ = 0;
     std::atomic<bool> cancelled_{false};
 };
 #endif
@@ -261,9 +116,7 @@ public:
           encoder_zero_(context_.create_device_buffer(1024u * 3u * sizeof(float))),
           graph_zero_(context_.create_device_buffer(1024u * sizeof(float)))
 #if defined(_WIN32)
-          , d3d12_(matching_d3d12_device(context_.adapter_luid())),
-          slots_{std::make_shared<GpuSlot>(), std::make_shared<GpuSlot>(),
-                 std::make_shared<GpuSlot>()}
+          , d3d12_(matching_d3d12_device(context_.adapter_luid()))
 #endif
           {
         const std::vector<float> encoder_zeros(1024u * 3u, 0.0f);
@@ -285,7 +138,7 @@ public:
             capabilities.d3d12_bgra8_sampled_image_import &&
             capabilities.d3d12_r32_storage_image_import;
         return {available, available ? context_.adapter_luid() : 0u,
-                available ? kGpuSlotCount : 0u};
+                available ? kMaxInFlightJobs : 0u};
 #else
         return {};
 #endif
@@ -299,13 +152,21 @@ public:
 #else
         if (!capabilities().available) throw std::runtime_error(
             "complete ZoeDepth D3D12/Vulkan interop is unavailable");
-        if (request.shared_texture_handle == 0u ||
-            request.wait_fence_handle == 0u || request.width < 2u ||
-            request.height < 2u || request.input_size == 0u ||
-            request.input_size % 32u != 0u)
+        if (!request.shared_texture_handle || !request.wait_fence_handle ||
+            !request.output_texture_handle || !request.signal_fence_handle ||
+            request.width < 2u || request.height < 2u ||
+            request.output_width != request.width ||
+            request.output_height != request.height ||
+            request.input_size == 0u || request.input_size % 32u != 0u)
             throw std::invalid_argument("invalid ZoeDepth GPU texture request");
-        validate_input(d3d12_.Get(), request.shared_texture_handle,
-                       request.width, request.height);
+        validate_texture(d3d12_.Get(), request.shared_texture_handle,
+            request.width, request.height,
+            request.rgba ? DXGI_FORMAT_R8G8B8A8_UNORM :
+                           DXGI_FORMAT_B8G8R8A8_UNORM,
+            "OpenSharedHandle(ZoeDepth input)");
+        validate_texture(d3d12_.Get(), request.output_texture_handle,
+            request.output_width, request.output_height,
+            DXGI_FORMAT_R32_FLOAT, "OpenSharedHandle(ZoeDepth output)");
         const std::uint32_t pad_height = static_cast<std::uint32_t>(
             std::sqrt(static_cast<double>(request.height) / 2.0) * 3.0);
         const std::uint32_t pad_width = static_cast<std::uint32_t>(
@@ -331,21 +192,25 @@ public:
             multiple32(scale_width * padded_width);
         const std::uint32_t network_height =
             multiple32(scale_height * padded_height);
-        auto slot = acquire_slot(slots_, next_slot_);
         try {
             std::lock_guard<std::mutex> lock(record_mutex_);
-            VulkanImage output = prepare_output(
-                *slot, d3d12_.Get(), context_, request.width, request.height);
-            const std::uint64_t signal_value = ++slot->fence_value;
+            VulkanImage output = context_.import_d3d12_image(
+                reinterpret_cast<void*>(request.output_texture_handle),
+                request.output_width, request.output_height,
+                VK_FORMAT_R32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
             VulkanImage input = context_.import_d3d12_image(
                 reinterpret_cast<void*>(request.shared_texture_handle),
-                request.width, request.height, VK_FORMAT_B8G8R8A8_UNORM,
+                request.width, request.height,
+                request.rgba ? VK_FORMAT_R8G8B8A8_UNORM :
+                               VK_FORMAT_B8G8R8A8_UNORM,
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
             VulkanSemaphore wait = context_.import_d3d12_fence(
                 reinterpret_cast<void*>(request.wait_fence_handle),
                 request.wait_fence_value);
             VulkanSemaphore signal = context_.import_d3d12_fence(
-                slot->shared.fence_handle, signal_value);
+                reinterpret_cast<void*>(request.signal_fence_handle),
+                request.signal_fence_value);
             VulkanSubmission submission = context_.batch_async(
                 std::move(wait), std::move(signal), [&] {
                     context_.acquire_external_image(
@@ -384,12 +249,9 @@ public:
                         VK_ACCESS_SHADER_WRITE_BIT);
                 });
             return std::make_shared<ExternalJobImpl>(
-                shared_from_this(), slot, std::move(input),
-                std::move(output), std::move(submission), request, signal_value);
-        } catch (...) {
-            slot->occupied.store(false);
-            throw;
-        }
+                shared_from_this(), std::move(input), std::move(output),
+                std::move(submission));
+        } catch (...) { throw; }
 #endif
     }
 
@@ -409,8 +271,6 @@ private:
     VulkanBuffer graph_zero_;
 #if defined(_WIN32)
     ComPtr<ID3D12Device> d3d12_;
-    std::array<std::shared_ptr<GpuSlot>, kGpuSlotCount> slots_;
-    std::atomic<std::uint32_t> next_slot_{0};
     std::mutex record_mutex_;
 #endif
 };
@@ -435,7 +295,7 @@ ExternalGpuCapabilities probe_external_gpu(std::uint32_t index) {
         capabilities.d3d12_bgra8_sampled_image_import &&
         capabilities.d3d12_r32_storage_image_import;
     return {available, available ? context.adapter_luid() : 0u,
-            available ? kGpuSlotCount : 0u};
+            available ? kMaxInFlightJobs : 0u};
 #else
     (void)index;
     return {};
