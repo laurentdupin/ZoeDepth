@@ -7,35 +7,40 @@ layout(set=0,binding=3,std430) readonly buffer B{float d[];}b;
 layout(push_constant) uniform P{uint rows;uint inputs;uint outputs;}p;
 #define K 8
 #define KS 9
-shared vec4 it[40*KS];
+shared vec4 it[24*KS];
 shared vec4 wt[64*KS];
 void main(){
  uint cb=gl_WorkGroupID.x*64+gl_LocalInvocationID.x;
- uint rb=gl_WorkGroupID.y*40+gl_LocalInvocationID.y*5;
- float s[5][4];
- for(uint r=0;r<5;++r)for(uint c=0;c<4;++c)s[r][c]=0.0;
+ uint rb=gl_WorkGroupID.y*24+gl_LocalInvocationID.y*3;
+ float s[3][4];
+ for(uint r=0;r<3;++r)for(uint c=0;c<4;++c)s[r][c]=0.0;
  uint lane=gl_LocalInvocationID.y*16+gl_LocalInvocationID.x;
  uint iv=p.inputs/4;
  for(uint base=0;base<iv;base+=K){
-  for(uint n=lane;n<40*K;n+=128){
-   uint tr=n/K,inner=base+n%K,row=gl_WorkGroupID.y*40+tr;
-   it[tr*KS+n%K]=row<p.rows&&inner<iv?i.d[row*iv+inner]:vec4(0.0);
+  for(uint n=lane;n<24*K;n+=128){
+   uint tr=n/K,inner=base+n%K,row=gl_WorkGroupID.y*24+tr;
+   it[tr*KS+n%K]=row<p.rows&&inner<iv
+    ?i.d[row*iv+inner]:vec4(0.0);
   }
   for(uint n=lane;n<64*K;n+=128){
    uint tc=n/K,inner=base+n%K,col=gl_WorkGroupID.x*64+tc;
-   wt[tc*KS+n%K]=col<p.outputs&&inner<iv?w.d[col*iv+inner]:vec4(0.0);
+   wt[tc*KS+n%K]=col<p.outputs&&inner<iv
+    ?w.d[col*iv+inner]:vec4(0.0);
   }
   barrier();
   uint count=min(K,iv-base);
   for(uint inner=0;inner<count;++inner){
-   vec4 a[5],q[4];
-   for(uint r=0;r<5;++r)a[r]=it[(gl_LocalInvocationID.y*5+r)*KS+inner];
-   for(uint c=0;c<4;++c)q[c]=wt[(gl_LocalInvocationID.x+c*16)*KS+inner];
-   for(uint r=0;r<5;++r)for(uint c=0;c<4;++c)s[r][c]+=dot(a[r],q[c]);
+   vec4 a[3],q[4];
+   for(uint r=0;r<3;++r)
+    a[r]=it[(gl_LocalInvocationID.y*3+r)*KS+inner];
+   for(uint c=0;c<4;++c)
+    q[c]=wt[(gl_LocalInvocationID.x+c*16)*KS+inner];
+   for(uint r=0;r<3;++r)for(uint c=0;c<4;++c)
+    s[r][c]+=dot(a[r],q[c]);
   }
   barrier();
  }
- for(uint r=0;r<5;++r){
+ for(uint r=0;r<3;++r){
   uint row=rb+r;if(row>=p.rows)continue;
   for(uint c=0;c<4;++c){uint col=cb+c*16;if(col<p.outputs)
    o.d[row*p.outputs+col]=s[r][c]+b.d[col];}

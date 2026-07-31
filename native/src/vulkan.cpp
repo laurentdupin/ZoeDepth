@@ -242,6 +242,14 @@ VulkanContext::VulkanContext(
     VkPhysicalDeviceSubgroupSizeControlFeatures subgroup_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
     };
+    VkPhysicalDeviceShaderFloat16Int8Features float16_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+    };
+    VkPhysicalDevice16BitStorageFeatures storage16_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
+    };
+    subgroup_features.pNext = &float16_features;
+    float16_features.pNext = &storage16_features;
     VkPhysicalDeviceFeatures2 device_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         &subgroup_features,
@@ -253,7 +261,21 @@ VulkanContext::VulkanContext(
          VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
         subgroup_control.minSubgroupSize <= 32 &&
         subgroup_control.maxSubgroupSize >= 32;
-    subgroup_size_ = subgroup_size_forced_ ? 32u : subgroup.subgroupSize;
+    native_subgroup_size_ = subgroup.subgroupSize;
+    subgroup_size_ = subgroup_size_forced_
+        ? 32u
+        : native_subgroup_size_;
+    float16_storage_ =
+        float16_features.shaderFloat16 == VK_TRUE &&
+        storage16_features.storageBuffer16BitAccess == VK_TRUE;
+    float16_features.shaderInt8 = VK_FALSE;
+    storage16_features.uniformAndStorageBuffer16BitAccess = VK_FALSE;
+    storage16_features.storagePushConstant16 = VK_FALSE;
+    storage16_features.storageInputOutput16 = VK_FALSE;
+    subgroup_features.pNext =
+        float16_storage_ ? &float16_features : nullptr;
+    float16_features.pNext =
+        float16_storage_ ? &storage16_features : nullptr;
 #if defined(_WIN32)
     VkPhysicalDeviceIDProperties identity{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
@@ -271,6 +293,15 @@ VulkanContext::VulkanContext(
 #endif
     vkGetPhysicalDeviceMemoryProperties(
         physical_device_, &memory_properties_);
+    for (std::uint32_t heap = 0;
+         heap < memory_properties_.memoryHeapCount;
+         ++heap) {
+        if ((memory_properties_.memoryHeaps[heap].flags &
+             VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
+            device_local_bytes_ +=
+                memory_properties_.memoryHeaps[heap].size;
+        }
+    }
 
     std::uint32_t extension_count = 0;
     check(
@@ -420,7 +451,11 @@ VulkanContext::VulkanContext(
     };
     const VkDeviceCreateInfo device_info{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        subgroup_size_forced_ ? &subgroup_features : nullptr,
+        subgroup_size_forced_
+            ? static_cast<void*>(&subgroup_features)
+            : float16_storage_
+            ? static_cast<void*>(&float16_features)
+            : nullptr,
         0,
         1,
         &queue_info,

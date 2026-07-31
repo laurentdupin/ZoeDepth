@@ -17,6 +17,11 @@ const VulkanBuffer& tensor(
     return model.tensor(name).buffer;
 }
 
+bool half_tensor(
+    const GpuModel& model, const std::string& name) {
+    return model.tensor(name).half_precision;
+}
+
 }  // namespace
 
 GpuEncoderOutput encoder_gpu(
@@ -74,7 +79,8 @@ GpuEncoderOutput encoder_gpu(
                 qkv, normalized,
                 tensor(model, base + "attn.qkv.weight"),
                 zero, tokens, embedding, embedding * 3,
-                false, false, false);
+                false, false,
+                half_tensor(model, base + "attn.qkv.weight"));
             operators.qv_bias(
                 qkv,
                 tensor(model, base + "attn.q_bias"),
@@ -91,7 +97,8 @@ GpuEncoderOutput encoder_gpu(
                 tensor(model, base + "attn.proj.weight"),
                 tensor(model, base + "attn.proj.bias"),
                 tokens, embedding, embedding,
-                false, false, false);
+                false, false,
+                half_tensor(model, base + "attn.proj.weight"));
             operators.add_scaled(
                 next, current, normalized,
                 tensor(model, base + "gamma_1"),
@@ -107,13 +114,15 @@ GpuEncoderOutput encoder_gpu(
                 tensor(model, base + "mlp.fc1.weight"),
                 tensor(model, base + "mlp.fc1.bias"),
                 tokens, embedding, embedding * 4,
-                true, false, false);
+                true, false,
+                half_tensor(model, base + "mlp.fc1.weight"));
             operators.linear(
                 branch, hidden,
                 tensor(model, base + "mlp.fc2.weight"),
                 tensor(model, base + "mlp.fc2.bias"),
                 tokens, embedding * 4, embedding,
-                false, false, false);
+                false, false,
+                half_tensor(model, base + "mlp.fc2.weight"));
             operators.add_scaled(
                 next, current, branch,
                 tensor(model, base + "gamma_2"),

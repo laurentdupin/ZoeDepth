@@ -25,7 +25,7 @@ if(ZOEDEPTH_WITH_VULKAN)
         set(HEADER "${ZOEDEPTH_GENERATED_DIR}/${NAME}_spv.h")
         add_custom_command(
             OUTPUT "${SPIRV}"
-            COMMAND Vulkan::glslc -fshader-stage=compute
+            COMMAND Vulkan::glslc -O -fshader-stage=compute
                 --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
                 -o "${SPIRV}" "${SOURCE}"
@@ -53,9 +53,12 @@ if(ZOEDEPTH_WITH_VULKAN)
             add_scaled add add_position bilinear_align_true
             bilinear_align_true_image bmm bmm_score_half bmm_value_half
             conv2d conv2d8 conv2d_half conv2d8_half conv2d_tiled
+            conv2d_tiled4
             conv_transpose_nonoverlap conv_transpose_nonoverlap_half
             elementwise gelu layer_norm linear linear16 linear_half
-            linear16_half linear_vec8 prepare_tokens position_bicubic project_tokens
+            linear16_half linear_vec8 linear_vec8_rows24
+            linear_vec8_rows24_half
+            prepare_tokens position_bicubic project_tokens
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
             group_norm silu nearest concatenate add_channel nchw_tokens
             geglu attention_scores attention_values preprocess_rgb

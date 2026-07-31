@@ -15,6 +15,7 @@ struct GpuTensor {
     std::array<std::uint64_t, 4> dimensions{};
     std::uint32_t rank = 0;
     std::uint64_t elements = 0;
+    bool half_precision = false;
 };
 
 class GpuModel {

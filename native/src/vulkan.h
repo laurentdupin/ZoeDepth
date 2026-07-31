@@ -173,6 +173,13 @@ public:
 
     const std::string& device_name() const { return device_name_; }
     std::uint32_t subgroup_size() const { return subgroup_size_; }
+    std::uint32_t native_subgroup_size() const {
+        return native_subgroup_size_;
+    }
+    bool float16_storage() const { return float16_storage_; }
+    std::uint64_t device_local_bytes() const {
+        return device_local_bytes_;
+    }
     const VulkanExternalCapabilities& external_capabilities() const {
         return external_capabilities_;
     }
@@ -419,7 +426,10 @@ private:
     std::atomic<std::uint64_t> tensor_download_bytes_{0};
     std::string device_name_;
     std::uint32_t subgroup_size_ = 0;
+    std::uint32_t native_subgroup_size_ = 0;
     bool subgroup_size_forced_ = false;
+    bool float16_storage_ = false;
+    std::uint64_t device_local_bytes_ = 0;
 };
 
 }  // namespace zoe_native
