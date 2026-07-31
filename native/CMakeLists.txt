@@ -86,10 +86,14 @@ if(ZOEDEPTH_WITH_VULKAN)
     target_sources(zoedepth_model PRIVATE
         src/vulkan.cpp src/operators.cpp src/gpu_model.cpp
         src/encoder_gpu.cpp src/graph_gpu.cpp src/gpu_io.cpp
+        src/external_gpu.cpp
         ${ZOEDEPTH_SHADER_HEADERS})
     target_include_directories(
         zoedepth_model PRIVATE "${ZOEDEPTH_GENERATED_DIR}")
     target_link_libraries(zoedepth_model PRIVATE Vulkan::Vulkan)
+    if(WIN32)
+        target_link_libraries(zoedepth_model PRIVATE d3d12 dxgi)
+    endif()
     target_compile_definitions(
         zoedepth_model PRIVATE ZOEDEPTH_WITH_VULKAN=1)
 endif()
