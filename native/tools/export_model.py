@@ -20,6 +20,10 @@ FORMAT_VERSION = 1
 ENDIAN_TAG = 0x01020304
 DTYPE_FLOAT32 = 1
 VARIANTS = {"n": 0, "k": 1, "nk": 2}
+VARIANT_ALIASES = {
+    "n": "n", "k": "k", "nk": "nk",
+    "ZoeN": "n", "ZoeK": "k", "ZoeNK": "nk",
+}
 HEADER = struct.Struct("<8sIIIIQQQQQ")
 RECORD = struct.Struct("<112sII4QQQQIIQ")
 METADATA = struct.Struct("<8sIIIIII32s64s")
@@ -51,10 +55,13 @@ def main() -> None:
     import torch
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--variant", choices=VARIANTS, required=True)
+    parser.add_argument(
+        "--variant", choices=VARIANT_ALIASES, required=True,
+        help="native variant or public InferBridge selector value")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    variant = VARIANT_ALIASES[args.variant]
     if not args.checkpoint.is_file():
         parser.error(f"checkpoint does not exist: {args.checkpoint}")
 
@@ -113,9 +120,9 @@ def main() -> None:
     converter = CONVERTER_ID.encode("ascii")
     metadata = METADATA.pack(
         b"ZOENMETA", 1, METADATA.size, FORMAT_VERSION,
-        VARIANTS[args.variant], 0, 0, canonical_sha, converter)
+        VARIANTS[variant], 0, 0, canonical_sha, converter)
     header = HEADER.pack(
-        MAGIC, FORMAT_VERSION, ENDIAN_TAG, VARIANTS[args.variant],
+        MAGIC, FORMAT_VERSION, ENDIAN_TAG, VARIANTS[variant],
         len(tensors), directory_offset, directory_bytes, data_offset,
         cursor, metadata_offset)
 
@@ -136,11 +143,11 @@ def main() -> None:
     cache_key = (
         f"zoedepth:{canonical_sha.hex()}:"
         f"converter={CONVERTER_ID}:format={FORMAT_VERSION}:"
-        f"variant={args.variant}")
+        f"variant={variant}")
     print(json.dumps({
         "format": "ZOENMOD",
         "format_version": FORMAT_VERSION,
-        "variant": args.variant,
+        "variant": variant,
         "tensor_count": len(tensors),
         "omitted_derived_indices": len(omitted_indices),
         "bytes": cursor,
@@ -153,4 +160,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
