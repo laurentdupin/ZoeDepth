@@ -17,6 +17,7 @@ struct GpuEncoderOutput {
 GpuEncoderOutput encoder_gpu(
     VulkanContext& context, GpuModel& model,
     VulkanOperators& operators, const VulkanBuffer& image,
-    std::uint32_t width, std::uint32_t height);
+    std::uint32_t width, std::uint32_t height,
+    const VulkanBuffer* persistent_zero = nullptr);
 
 }  // namespace zoe_native

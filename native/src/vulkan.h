@@ -24,6 +24,10 @@
 
 namespace zoe_native {
 
+void global_transfer_counters(
+    std::uint64_t& upload_bytes,
+    std::uint64_t& download_bytes);
+
 class VulkanContext;
 class VulkanPipeline;
 class VulkanBuffer;

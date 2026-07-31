@@ -360,6 +360,22 @@ void ZOEDEPTH_CALL zoedepth_destroy(
     delete context;
 }
 
+zoedepth_status ZOEDEPTH_CALL zoedepth_get_transfer_counters(
+    zoedepth_transfer_counters* counters) {
+    if (!counters || counters->struct_size < sizeof(*counters))
+        return fail(ZOEDEPTH_STATUS_INVALID_ARGUMENT,
+                    "invalid ZoeDepth transfer counter descriptor");
+    *counters = {};
+    counters->struct_size = sizeof(*counters);
+    counters->abi_version = ZOEDEPTH_ABI_VERSION;
+#if defined(ZOEDEPTH_WITH_VULKAN)
+    zoe_native::global_transfer_counters(
+        counters->tensor_upload_bytes, counters->tensor_download_bytes);
+#endif
+    last_error.clear();
+    return ZOEDEPTH_STATUS_OK;
+}
+
 zoedepth_status ZOEDEPTH_CALL zoedepth_infer_rgb_f32(
     zoedepth_context* context,
     const float* rgb,

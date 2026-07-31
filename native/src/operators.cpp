@@ -57,6 +57,7 @@
 #include "attractor_activate_spv.h"
 #include "attractor_update_spv.h"
 #include "distribution_depth_spv.h"
+#include "select_depth_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -293,7 +294,10 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           zoe_attractor_update_spv_size, 4, 16)),
       distribution_depth_(context.create_pipeline(
           zoe_distribution_depth_spv,
-          zoe_distribution_depth_spv_size, 3, 4)) {
+          zoe_distribution_depth_spv_size, 3, 4)),
+      select_depth_(context.create_pipeline(
+          zoe_select_depth_spv,
+          zoe_select_depth_spv_size, 4, 4)) {
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -1464,6 +1468,19 @@ void VulkanOperators::distribution_depth(
     context_.dispatch(
         distribution_depth_, {&depth, &parameters_buffer, &centers},
         &pixels, sizeof(pixels), divide_up(pixels, 64));
+}
+
+void VulkanOperators::select_depth(
+    VulkanBuffer& output, const VulkanBuffer& nyu,
+    const VulkanBuffer& kitti, const VulkanBuffer& logits,
+    std::uint32_t pixels) {
+    require_bytes(output, pixels, "selected depth");
+    require_bytes(nyu, pixels, "NYU depth");
+    require_bytes(kitti, pixels, "KITTI depth");
+    require_bytes(logits, 2, "routing logits");
+    context_.dispatch(
+        select_depth_, {&output, &nyu, &kitti, &logits},
+        &pixels, sizeof(pixels), divide_up(pixels, 256));
 }
 
 }  // namespace zoe_native

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-07-31",
+  "device": "AMD Radeon RX 9070",
+  "contract": "InferBridge harness API 1.6 D3D12 shared texture/fence",
+  "input": "DXGI_FORMAT_B8G8R8A8_UNORM shared TEXTURE2D",
+  "output": "DXGI_FORMAT_R32_FLOAT shared TEXTURE2D lease",
+  "maximumInFlightJobs": 3,
+  "exactLuidSelection": true,
+  "commonAbiEntryPointsPassed": true,
+  "sourceFrameAndTimestampCorrelation": true,
+  "leaseSurvivesJobModelRuntimeRelease": true,
+  "threeRetainedLeasesAndStableReuse": true,
+  "cancellationAndShutdown": true,
+  "internalSynchronization": "single Vulkan queue submission with imported D3D12 wait and signal fences",
+  "cpuWaitsBetweenOperators": 0,
+  "vkQueueWaitIdleCalls": 0,
+  "nativePathTensorUploadByteDelta": 0,
+  "nativePathTensorDownloadByteDelta": 0,
+  "counterScope": "the exact common ibrh submit D3D12 texture path after model load",
+  "cases": [
+    {
+      "id": "zoedepth-n",
+      "model": "zoed_n.zoe",
+      "maximumCpuNormalizedRangeDeviation": 0.0000114441,
+      "passed": true
+    },
+    {
+      "id": "zoedepth-k",
+      "model": "zoed_k.zoe",
+      "maximumCpuNormalizedRangeDeviation": 0.0000201464,
+      "passed": true
+    },
+    {
+      "id": "zoedepth-nk",
+      "model": "zoed_nk.zoe",
+      "maximumCpuNormalizedRangeDeviation": 0.00000983477,
+      "gpuResidentDualHeadRouting": true,
+      "passed": true
+    }
+  ]
+}

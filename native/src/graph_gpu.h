@@ -13,6 +13,7 @@ struct GpuFeature {
 
 GpuFeature full_graph_gpu(
     VulkanContext& context, GpuModel& model,
-    VulkanOperators& operators, GpuEncoderOutput&& encoded);
+    VulkanOperators& operators, GpuEncoderOutput&& encoded,
+    const VulkanBuffer* persistent_zero = nullptr);
 
 }  // namespace zoe_native

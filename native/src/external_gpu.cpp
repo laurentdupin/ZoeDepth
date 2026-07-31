@@ -13,6 +13,7 @@
 #include <cstring>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -256,13 +257,24 @@ public:
         : model_(path, variant == ZOEDEPTH_VARIANT_K ? Variant::k :
               variant == ZOEDEPTH_VARIANT_NK ? Variant::nk : Variant::n),
           context_(index), gpu_model_(model_, context_),
-          operators_(context_), io_(context_)
+          operators_(context_), io_(context_),
+          encoder_zero_(context_.create_device_buffer(1024u * 3u * sizeof(float))),
+          graph_zero_(context_.create_device_buffer(1024u * sizeof(float)))
 #if defined(_WIN32)
           , d3d12_(matching_d3d12_device(context_.adapter_luid())),
           slots_{std::make_shared<GpuSlot>(), std::make_shared<GpuSlot>(),
                  std::make_shared<GpuSlot>()}
 #endif
-          {}
+          {
+        const std::vector<float> encoder_zeros(1024u * 3u, 0.0f);
+        const std::vector<float> graph_zeros(1024u, 0.0f);
+        context_.upload(
+            encoder_zero_, encoder_zeros.data(),
+            encoder_zeros.size() * sizeof(float));
+        context_.upload(
+            graph_zero_, graph_zeros.data(),
+            graph_zeros.size() * sizeof(float));
+    }
 
     ExternalGpuCapabilities capabilities() const override {
 #if defined(_WIN32)
@@ -353,7 +365,9 @@ public:
                         return full_graph_gpu(
                             context_, gpu_model_, operators_,
                             encoder_gpu(context_, gpu_model_, operators_,
-                                        prepared, network_width, network_height));
+                                        prepared, network_width, network_height,
+                                        &encoder_zero_),
+                            &graph_zero_);
                     };
                     GpuFeature direct = run(false);
                     GpuFeature flipped = run(true);
@@ -391,6 +405,8 @@ private:
     GpuModel gpu_model_;
     VulkanOperators operators_;
     GpuIo io_;
+    VulkanBuffer encoder_zero_;
+    VulkanBuffer graph_zero_;
 #if defined(_WIN32)
     ComPtr<ID3D12Device> d3d12_;
     std::array<std::shared_ptr<GpuSlot>, kGpuSlotCount> slots_;

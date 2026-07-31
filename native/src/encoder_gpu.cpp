@@ -27,7 +27,8 @@ bool half_tensor(
 GpuEncoderOutput encoder_gpu(
     VulkanContext& context, GpuModel& model,
     VulkanOperators& operators, const VulkanBuffer& image,
-    std::uint32_t width, std::uint32_t height) {
+    std::uint32_t width, std::uint32_t height,
+    const VulkanBuffer* persistent_zero) {
     if (width == 0 || height == 0 ||
         width % 16 != 0 || height % 16 != 0) {
         throw std::invalid_argument(
@@ -48,11 +49,17 @@ GpuEncoderOutput encoder_gpu(
     VulkanBuffer hidden = context.create_device_buffer(bytes * 4);
     VulkanBuffer scores = context.create_device_buffer(
         std::uint64_t(heads) * tokens * tokens * sizeof(float));
-    VulkanBuffer zero = context.create_device_buffer(
-        embedding * 3 * sizeof(float));
-    const std::vector<float> zero_values(embedding * 3, 0.0f);
-    context.upload(
-        zero, zero_values.data(), zero_values.size() * sizeof(float));
+    VulkanBuffer owned_zero;
+    if (persistent_zero == nullptr) {
+        owned_zero = context.create_device_buffer(
+            embedding * 3 * sizeof(float));
+        const std::vector<float> zero_values(embedding * 3, 0.0f);
+        context.upload(
+            owned_zero, zero_values.data(),
+            zero_values.size() * sizeof(float));
+        persistent_zero = &owned_zero;
+    }
+    const VulkanBuffer& zero = *persistent_zero;
     context.batch([&] {
         operators.prepare_beit(
             current, image,

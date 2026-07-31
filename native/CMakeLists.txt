@@ -66,7 +66,7 @@ if(ZOEDEPTH_WITH_VULKAN)
             prepare_beit qv_bias relative_bias readout_concat
             tokens_to_nchw_plain softplus router_tokens qkv_split
             seed_centers attractor_activate attractor_update
-            distribution_depth)
+            distribution_depth select_depth)
         zoedepth_compile_shader(${SHADER})
     endforeach()
     zoedepth_compile_shader(preprocess_texture)
@@ -162,6 +162,20 @@ if(BUILD_TESTING)
         COMMAND zoedepth_harness_full_graph)
     set_tests_properties(
         zoedepth_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+    if(WIN32 AND ZOEDEPTH_WITH_VULKAN)
+        add_executable(
+            zoedepth_d3d12_full_graph tests/d3d12_full_graph.cpp)
+        target_link_libraries(
+            zoedepth_d3d12_full_graph PRIVATE zoedepth_model d3d12 dxgi)
+        target_include_directories(
+            zoedepth_d3d12_full_graph PRIVATE include)
+        target_compile_options(
+            zoedepth_d3d12_full_graph PRIVATE /W4 /permissive-)
+        add_test(NAME zoedepth_d3d12_full_graph
+                 COMMAND zoedepth_d3d12_full_graph)
+        set_tests_properties(
+            zoedepth_d3d12_full_graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
     if(ZOEDEPTH_WITH_VULKAN)
         add_executable(
             zoedepth_gpu_encoder_probe

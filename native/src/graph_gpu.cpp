@@ -302,7 +302,7 @@ GpuDecoderOutput decode(
     return output;
 }
 
-std::string route_nk(
+VulkanBuffer route_nk(
     VulkanContext& context, GpuModel& model,
     VulkanOperators& operators, const VulkanBuffer& zero,
     const GpuFeature& bottleneck) {
@@ -395,23 +395,14 @@ std::string route_nk(
             tensor(model, "mlp_classifier.2.bias"),
             1, 128, 2, false);
     });
-    float host_logits[2] = {};
-    context.download(logits, host_logits, sizeof(host_logits));
-    return host_logits[0] >= host_logits[1] ? "nyu" : "kitti";
+    return logits;
 }
 
-GpuFeature metric(
+GpuFeature metric_domain(
     VulkanContext& context, GpuModel& model,
     VulkanOperators& operators, const VulkanBuffer& zero,
-    GpuDecoderOutput&& decoded) {
-    const Variant variant = model.variant();
-    const bool normalized = variant == Variant::k;
-    const bool dual = variant == Variant::nk;
-    GpuFeature bottleneck = conv(
-        context, model, operators, zero, decoded.bottleneck,
-        "conv2.weight", "conv2.bias", 1, 0);
-    const std::string domain =
-        dual ? route_nk(context, model, operators, zero, bottleneck) : "";
+    const GpuDecoderOutput& decoded, const GpuFeature& bottleneck,
+    const std::string& domain, bool normalized, bool dual) {
     const std::string seed_base = dual
         ? "seed_bin_regressors." + domain : "seed_bin_regressor";
     const std::string attractor_base = dual
@@ -502,7 +493,7 @@ GpuFeature metric(
     }
     GpuFeature last;
     if (dual) {
-        last = std::move(decoded.out_conv);
+        last = clone(context, decoded.out_conv);
     } else {
         GpuFeature relative = resize(
             context, operators, decoded.relative_depth,
@@ -541,14 +532,55 @@ GpuFeature metric(
     return depth;
 }
 
+GpuFeature metric(
+    VulkanContext& context, GpuModel& model,
+    VulkanOperators& operators, const VulkanBuffer& zero,
+    GpuDecoderOutput&& decoded) {
+    const Variant variant = model.variant();
+    const bool dual = variant == Variant::nk;
+    GpuFeature bottleneck = conv(
+        context, model, operators, zero, decoded.bottleneck,
+        "conv2.weight", "conv2.bias", 1, 0);
+    if (!dual) {
+        return metric_domain(
+            context, model, operators, zero, decoded, bottleneck, "",
+            variant == Variant::k, false);
+    }
+
+    VulkanBuffer logits = route_nk(
+        context, model, operators, zero, bottleneck);
+    GpuFeature nyu = metric_domain(
+        context, model, operators, zero, decoded, bottleneck,
+        "nyu", false, true);
+    GpuFeature kitti = metric_domain(
+        context, model, operators, zero, decoded, bottleneck,
+        "kitti", false, true);
+    GpuFeature selected{
+        context.create_device_buffer(
+            std::uint64_t(nyu.height) * nyu.width * sizeof(float)),
+        1, nyu.height, nyu.width};
+    context.batch([&] {
+        operators.select_depth(
+            selected.buffer, nyu.buffer, kitti.buffer, logits,
+            nyu.height * nyu.width);
+    });
+    return selected;
+}
+
 }  // namespace
 
 GpuFeature full_graph_gpu(
     VulkanContext& context, GpuModel& model,
-    VulkanOperators& operators, GpuEncoderOutput&& encoded) {
-    VulkanBuffer zero = context.create_device_buffer(1024 * sizeof(float));
-    const std::vector<float> zeros(1024, 0.0f);
-    context.upload(zero, zeros.data(), zeros.size() * sizeof(float));
+    VulkanOperators& operators, GpuEncoderOutput&& encoded,
+    const VulkanBuffer* persistent_zero) {
+    VulkanBuffer owned_zero;
+    if (persistent_zero == nullptr) {
+        owned_zero = context.create_device_buffer(1024 * sizeof(float));
+        const std::vector<float> zeros(1024, 0.0f);
+        context.upload(owned_zero, zeros.data(), zeros.size() * sizeof(float));
+        persistent_zero = &owned_zero;
+    }
+    const VulkanBuffer& zero = *persistent_zero;
     GpuDecoderOutput decoded = decode(
         context, model, operators, zero, std::move(encoded));
     GpuFeature result;

@@ -12,6 +12,9 @@
 namespace zoe_native {
 namespace {
 
+std::atomic<std::uint64_t> g_tensor_upload_bytes{0u};
+std::atomic<std::uint64_t> g_tensor_download_bytes{0u};
+
 template <typename Handle>
 void exchange_handle(Handle& left, Handle& right) {
     std::swap(left, right);
@@ -502,15 +505,17 @@ VulkanContext::VulkanContext(
         "vkCreateCommandPool");
 
     const VkDescriptorPoolSize pool_sizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
     };
     const VkDescriptorPoolCreateInfo descriptor_pool_info{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         nullptr,
         VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        1024,
-        2,
+        4096,
+        4,
         pool_sizes,
     };
     check(
@@ -1373,6 +1378,8 @@ void VulkanContext::upload(
     tensor_upload_bytes_.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    g_tensor_upload_bytes.fetch_add(
+        static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     std::memcpy(staging.mapped_, data, bytes);
     copy_buffer_raw(
@@ -1389,6 +1396,8 @@ void VulkanContext::download(
     tensor_download_bytes_.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    g_tensor_download_bytes.fetch_add(
+        static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     copy_buffer_raw(
         source.buffer_, staging.buffer_, 0, 0, bytes);
@@ -1774,6 +1783,13 @@ void VulkanContext::dispatch_buffer_to_image(
         group_y,
         group_z,
         nullptr);
+}
+
+void global_transfer_counters(
+    std::uint64_t& upload_bytes,
+    std::uint64_t& download_bytes) {
+    upload_bytes = g_tensor_upload_bytes.load(std::memory_order_relaxed);
+    download_bytes = g_tensor_download_bytes.load(std::memory_order_relaxed);
 }
 
 void VulkanContext::dispatch_buffers_to_image(

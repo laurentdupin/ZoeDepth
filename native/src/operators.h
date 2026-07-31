@@ -216,6 +216,10 @@ public:
     void distribution_depth(
         VulkanBuffer& depth, const VulkanBuffer& parameters,
         const VulkanBuffer& centers, std::uint32_t pixels);
+    void select_depth(
+        VulkanBuffer& output, const VulkanBuffer& nyu,
+        const VulkanBuffer& kitti, const VulkanBuffer& logits,
+        std::uint32_t pixels);
 
 private:
     VulkanContext& context_;
@@ -276,6 +280,7 @@ private:
     VulkanPipeline attractor_activate_;
     VulkanPipeline attractor_update_;
     VulkanPipeline distribution_depth_;
+    VulkanPipeline select_depth_;
 };
 
 }  // namespace zoe_native

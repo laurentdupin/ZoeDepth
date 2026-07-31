@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define ZOEDEPTH_ABI_VERSION 3u
+#define ZOEDEPTH_ABI_VERSION 4u
 
 typedef struct zoedepth_context zoedepth_context;
 
@@ -37,6 +37,13 @@ typedef enum zoedepth_variant {
     ZOEDEPTH_VARIANT_NK = 2
 } zoedepth_variant;
 
+typedef struct zoedepth_transfer_counters {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t tensor_upload_bytes;
+    uint64_t tensor_download_bytes;
+} zoedepth_transfer_counters;
+
 ZOEDEPTH_API uint32_t ZOEDEPTH_CALL zoedepth_abi_version(void);
 ZOEDEPTH_API const char* ZOEDEPTH_CALL zoedepth_version_string(void);
 ZOEDEPTH_API const char* ZOEDEPTH_CALL zoedepth_last_error(void);
@@ -52,6 +59,8 @@ ZOEDEPTH_API zoedepth_status ZOEDEPTH_CALL zoedepth_create_vulkan(
     zoedepth_context** context);
 ZOEDEPTH_API void ZOEDEPTH_CALL zoedepth_destroy(
     zoedepth_context* context);
+ZOEDEPTH_API zoedepth_status ZOEDEPTH_CALL
+zoedepth_get_transfer_counters(zoedepth_transfer_counters* counters);
 
 /*
  * Executes the ZoeD-M12 variant selected at context creation. Input is
