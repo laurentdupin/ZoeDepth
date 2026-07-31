@@ -69,6 +69,8 @@ if(ZOEDEPTH_WITH_VULKAN)
             distribution_depth)
         zoedepth_compile_shader(${SHADER})
     endforeach()
+    zoedepth_compile_shader(preprocess_texture)
+    zoedepth_compile_shader(combine_depth_image)
 endif()
 
 add_library(zoedepth_core STATIC
@@ -83,7 +85,7 @@ add_library(zoedepth_model SHARED
 if(ZOEDEPTH_WITH_VULKAN)
     target_sources(zoedepth_model PRIVATE
         src/vulkan.cpp src/operators.cpp src/gpu_model.cpp
-        src/encoder_gpu.cpp src/graph_gpu.cpp
+        src/encoder_gpu.cpp src/graph_gpu.cpp src/gpu_io.cpp
         ${ZOEDEPTH_SHADER_HEADERS})
     target_include_directories(
         zoedepth_model PRIVATE "${ZOEDEPTH_GENERATED_DIR}")

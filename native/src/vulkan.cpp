@@ -1776,6 +1776,25 @@ void VulkanContext::dispatch_buffer_to_image(
         nullptr);
 }
 
+void VulkanContext::dispatch_buffers_to_image(
+    const VulkanPipeline& pipeline,
+    const std::vector<const VulkanBuffer*>& buffers,
+    VulkanImage& image,
+    const void* push_constants,
+    std::uint32_t push_constant_bytes,
+    std::uint32_t group_x,
+    std::uint32_t group_y,
+    std::uint32_t group_z) {
+    std::vector<VulkanDispatchResource> resources;
+    resources.reserve(buffers.size() + 1u);
+    resources.push_back({nullptr, &image});
+    for (const VulkanBuffer* buffer : buffers)
+        resources.push_back({buffer, nullptr});
+    dispatch_resources(
+        pipeline, resources, push_constants, push_constant_bytes,
+        group_x, group_y, group_z, nullptr);
+}
+
 void VulkanContext::dispatch_resources(
     const VulkanPipeline& pipeline,
     const std::vector<VulkanDispatchResource>& resources,
