@@ -7,6 +7,7 @@
 #include "graph_gpu.h"
 #include "model.h"
 #include "operators.h"
+#include "inferbridge/native_harness_resource_lifetime.h"
 
 #include <array>
 #include <atomic>
@@ -82,12 +83,14 @@ void validate_texture(ID3D12Device* device, std::uintptr_t handle,
 class ExternalJobImpl final : public ExternalJob {
 public:
     ExternalJobImpl(std::shared_ptr<ExternalGpu> owner, VulkanImage input,
-        VulkanImage output, VulkanSubmission submission)
+        VulkanImage output, VulkanSubmission submission,
+        inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime)
         : owner_(std::move(owner)), input_(std::move(input)),
-          output_(std::move(output)), submission_(std::move(submission)) {}
+          output_(std::move(output)), submission_(std::move(submission)),
+          lifetime_(std::move(lifetime)) {}
     ~ExternalJobImpl() override {
-        try { submission_.wait(); } catch (...) {}
-        submission_ = {}; output_ = {}; input_ = {};
+        inferbridge::native_harness::wait_then_retire(
+            lifetime_, submission_, [this] { output_ = {}; input_ = {}; });
     }
     ExternalJobState state() const override {
         if (cancelled_.load()) return ExternalJobState::cancelled;
@@ -99,6 +102,7 @@ private:
     std::shared_ptr<ExternalGpu> owner_;
     VulkanImage input_, output_;
     VulkanSubmission submission_;
+    inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime_;
     std::atomic<bool> cancelled_{false};
 };
 #endif
@@ -193,7 +197,7 @@ public:
         const std::uint32_t network_height =
             multiple32(scale_height * padded_height);
         try {
-            std::lock_guard<std::mutex> lock(record_mutex_);
+            auto lifetime_guard = lifetime_->acquire();
             VulkanImage output = context_.import_d3d12_image(
                 reinterpret_cast<void*>(request.output_texture_handle),
                 request.output_width, request.output_height,
@@ -250,7 +254,7 @@ public:
                 });
             return std::make_shared<ExternalJobImpl>(
                 shared_from_this(), std::move(input), std::move(output),
-                std::move(submission));
+                std::move(submission), lifetime_);
         } catch (...) { throw; }
 #endif
     }
@@ -271,7 +275,8 @@ private:
     VulkanBuffer graph_zero_;
 #if defined(_WIN32)
     ComPtr<ID3D12Device> d3d12_;
-    std::mutex record_mutex_;
+    inferbridge::native_harness::ResourceLifetimeDomainPtr lifetime_ =
+        inferbridge::native_harness::make_resource_lifetime_domain();
 #endif
 };
 
