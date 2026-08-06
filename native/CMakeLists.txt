@@ -79,6 +79,7 @@ add_library(zoedepth_core STATIC
     src/model.cpp
     src/encoder_cpu.cpp
     src/graph_cpu.cpp)
+set_target_properties(zoedepth_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(zoedepth_core PUBLIC src)
 
 add_library(zoedepth_model SHARED
