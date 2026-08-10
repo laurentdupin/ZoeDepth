@@ -355,11 +355,11 @@ ibrh_result IBRH_CALL model_get_port(const ibrh_model* model, uint32_t direction
     *out={}; out->struct_size=sizeof(*out); out->api_version=IBRH_CURRENT_API_VERSION;
     out->index=0u; out->direction=direction;
     out->semantic=direction==IBRH_PORT_INPUT?IBRH_SEMANTIC_IMAGE:IBRH_SEMANTIC_DEPTH;
-    out->payload_type=direction==IBRH_PORT_INPUT?IBRH_PIXEL_BGRA8:IBRH_PIXEL_DEPTH_METRIC_FLOAT32;
+    out->payload_type=direction==IBRH_PORT_INPUT?IBRH_PIXEL_BGRA8:IBRH_PIXEL_DEPTH_FLOAT32;
     out->pixel_format=out->payload_type;
     out->accepted_pixel_format_mask=direction==IBRH_PORT_INPUT?
         ((1ull<<IBRH_PIXEL_BGRA8)|(1ull<<IBRH_PIXEL_RGBA8)):
-        (1ull<<IBRH_PIXEL_DEPTH_METRIC_FLOAT32);
+        (1ull<<IBRH_PIXEL_DEPTH_FLOAT32);
     out->resource_kind=IBRH_RESOURCE_KIND_IMAGE_2D; out->depth=1u;
     out->flags=IBRH_DESCRIPTOR_DYNAMIC_WIDTH|IBRH_DESCRIPTOR_DYNAMIC_HEIGHT;
     return IBRH_OK;
@@ -398,7 +398,7 @@ ibrh_result IBRH_CALL submit(ibrh_model* model, size_t request_size,
                     "ZoeDepth Size must be a multiple of 32 up to 4096");
     if(!input.width||!input.height||destination.width!=input.width||
        destination.height!=input.height||
-       destination.pixel_format!=IBRH_PIXEL_DEPTH_METRIC_FLOAT32)
+       destination.pixel_format!=IBRH_PIXEL_DEPTH_FLOAT32)
         return IBRH_ERROR_INVALID_ARGUMENT;
 #if defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32)
     if(input.domain==IBRH_RESOURCE_DOMAIN_D3D12){
