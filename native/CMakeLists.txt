@@ -73,6 +73,10 @@ if(ZOEDEPTH_WITH_VULKAN)
     endforeach()
     zoedepth_compile_shader(preprocess_texture)
     zoedepth_compile_shader(combine_depth_image)
+    zoedepth_compile_shader(combine_depth_buffer)
+    zoedepth_compile_shader(reduce_minmax)
+    zoedepth_compile_shader(normalize_inverse)
+    zoedepth_compile_shader(depth_buffer_to_image)
 endif()
 
 add_library(zoedepth_core STATIC

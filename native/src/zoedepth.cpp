@@ -264,6 +264,20 @@ std::vector<float> execute_prepared(
                     *context.model, prepared.data(), width, height)));
     return std::move(result.values);
 }
+
+void normalize_inverse(std::vector<float>& values) {
+    if (values.empty()) return;
+    const auto bounds = std::minmax_element(values.begin(), values.end());
+    const float minimum = *bounds.first;
+    const float span = *bounds.second - minimum;
+    if (!(span > 0.0f)) {
+        std::fill(values.begin(), values.end(), 1.0f);
+        return;
+    }
+    for (float& value : values) {
+        value = 1.0f - std::clamp((value - minimum) / span, 0.0f, 1.0f);
+    }
+}
 }
 
 extern "C" {
@@ -406,6 +420,7 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_infer_rgb_f32(
             *context, prepared,
             static_cast<std::uint32_t>(width),
             static_cast<std::uint32_t>(height));
+        normalize_inverse(result);
         std::copy(
             result.begin(), result.end(), depth);
     });
@@ -515,6 +530,10 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_infer_bgra8_f32(
                         flipped[static_cast<std::size_t>(flipped_index)]);
             }
         }
+        std::vector<float> normalized(
+            depth, depth + static_cast<std::uint64_t>(source_width) * source_height);
+        normalize_inverse(normalized);
+        std::copy(normalized.begin(), normalized.end(), depth);
     });
 }
 

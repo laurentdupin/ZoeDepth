@@ -240,11 +240,19 @@ public:
                     };
                     GpuFeature direct = run(false);
                     GpuFeature flipped = run(true);
+                    const std::uint32_t output_count =
+                        request.width * request.height;
+                    VulkanBuffer combined = context_.create_device_buffer(
+                        static_cast<std::uint64_t>(output_count) * sizeof(float));
                     io_.combine_depth(
-                        output, direct.buffer, flipped.buffer,
+                        combined, direct.buffer, flipped.buffer,
                         network_width, network_height,
                         padded_width, padded_height,
-                        pad_width, pad_height);
+                        pad_width, pad_height,
+                        request.width, request.height);
+                    io_.normalize_inverse(combined, output_count);
+                    io_.write_depth(
+                        output, combined, request.width, request.height);
                     context_.release_external_image(
                         input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_ACCESS_SHADER_READ_BIT);
