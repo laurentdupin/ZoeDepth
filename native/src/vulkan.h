@@ -181,6 +181,9 @@ public:
         return native_subgroup_size_;
     }
     bool float16_storage() const { return float16_storage_; }
+    bool supports_packed_int8_dot() const {
+        return packed_int8_dot_supported_;
+    }
     std::uint64_t device_local_bytes() const {
         return device_local_bytes_;
     }
@@ -442,6 +445,7 @@ private:
     std::uint32_t native_subgroup_size_ = 0;
     bool subgroup_size_forced_ = false;
     bool float16_storage_ = false;
+    bool packed_int8_dot_supported_ = false;
     std::uint64_t device_local_bytes_ = 0;
 };
 

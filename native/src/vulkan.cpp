@@ -251,8 +251,12 @@ VulkanContext::VulkanContext(
     VkPhysicalDevice16BitStorageFeatures storage16_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
     };
+    VkPhysicalDeviceShaderIntegerDotProductFeatures integer_dot_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+    };
     subgroup_features.pNext = &float16_features;
     float16_features.pNext = &storage16_features;
+    storage16_features.pNext = &integer_dot_features;
     VkPhysicalDeviceFeatures2 device_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         &subgroup_features,
@@ -271,14 +275,27 @@ VulkanContext::VulkanContext(
     float16_storage_ =
         float16_features.shaderFloat16 == VK_TRUE &&
         storage16_features.storageBuffer16BitAccess == VK_TRUE;
+    VkPhysicalDeviceShaderIntegerDotProductProperties integer_dot_properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 integer_dot_properties2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        &integer_dot_properties,
+    };
+    vkGetPhysicalDeviceProperties2(physical_device_, &integer_dot_properties2);
+    packed_int8_dot_supported_ =
+        integer_dot_features.shaderIntegerDotProduct == VK_TRUE &&
+        integer_dot_properties
+            .integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE;
     float16_features.shaderInt8 = VK_FALSE;
     storage16_features.uniformAndStorageBuffer16BitAccess = VK_FALSE;
     storage16_features.storagePushConstant16 = VK_FALSE;
     storage16_features.storageInputOutput16 = VK_FALSE;
-    subgroup_features.pNext =
-        float16_storage_ ? &float16_features : nullptr;
-    float16_features.pNext =
-        float16_storage_ ? &storage16_features : nullptr;
+    integer_dot_features.shaderIntegerDotProduct =
+        packed_int8_dot_supported_ ? VK_TRUE : VK_FALSE;
+    subgroup_features.pNext = &float16_features;
+    float16_features.pNext = &storage16_features;
+    storage16_features.pNext = &integer_dot_features;
 #if defined(_WIN32)
     VkPhysicalDeviceIDProperties identity{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
@@ -456,9 +473,7 @@ VulkanContext::VulkanContext(
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         subgroup_size_forced_
             ? static_cast<void*>(&subgroup_features)
-            : float16_storage_
-            ? static_cast<void*>(&float16_features)
-            : nullptr,
+            : static_cast<void*>(&float16_features),
         0,
         1,
         &queue_info,

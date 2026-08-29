@@ -17,9 +17,23 @@ const VulkanBuffer& tensor(
     return model.tensor(name).buffer;
 }
 
-bool half_tensor(
-    const GpuModel& model, const std::string& name) {
-    return model.tensor(name).half_precision;
+void linear_model(
+    GpuModel& model, VulkanOperators& operators,
+    VulkanBuffer& output, const VulkanBuffer& input,
+    const std::string& weight_name, const VulkanBuffer& bias,
+    std::uint32_t rows, std::uint32_t input_columns,
+    std::uint32_t output_columns, bool gelu = false) {
+    const GpuTensor& weight = model.tensor(weight_name);
+    if (model.uses_int8_weights() &&
+        weight.int8_buffer.handle() != VK_NULL_HANDLE) {
+        operators.linear_int8(output, input, weight.int8_buffer,
+            weight.int8_scales, bias, rows, input_columns,
+            output_columns, gelu);
+    } else {
+        operators.linear(output, input, weight.buffer, bias, rows,
+            input_columns, output_columns, gelu, false,
+            weight.half_precision);
+    }
 }
 
 }  // namespace
@@ -82,12 +96,9 @@ GpuEncoderOutput encoder_gpu(
                 tensor(model, base + "norm1.weight"),
                 tensor(model, base + "norm1.bias"),
                 tokens, embedding, 1.0e-6f);
-            operators.linear(
-                qkv, normalized,
-                tensor(model, base + "attn.qkv.weight"),
-                zero, tokens, embedding, embedding * 3,
-                false, false,
-                half_tensor(model, base + "attn.qkv.weight"));
+            linear_model(model, operators, qkv, normalized,
+                base + "attn.qkv.weight", zero, tokens,
+                embedding, embedding * 3);
             operators.qv_bias(
                 qkv,
                 tensor(model, base + "attn.q_bias"),
@@ -99,13 +110,10 @@ GpuEncoderOutput encoder_gpu(
                     model,
                     base + "attn.relative_position_bias_table"),
                 scores, patch_width, patch_height, heads);
-            operators.linear(
-                normalized, branch,
-                tensor(model, base + "attn.proj.weight"),
+            linear_model(model, operators, normalized, branch,
+                base + "attn.proj.weight",
                 tensor(model, base + "attn.proj.bias"),
-                tokens, embedding, embedding,
-                false, false,
-                half_tensor(model, base + "attn.proj.weight"));
+                tokens, embedding, embedding);
             operators.add_scaled(
                 next, current, normalized,
                 tensor(model, base + "gamma_1"),
@@ -116,20 +124,14 @@ GpuEncoderOutput encoder_gpu(
                 tensor(model, base + "norm2.weight"),
                 tensor(model, base + "norm2.bias"),
                 tokens, embedding, 1.0e-6f);
-            operators.linear(
-                hidden, normalized,
-                tensor(model, base + "mlp.fc1.weight"),
+            linear_model(model, operators, hidden, normalized,
+                base + "mlp.fc1.weight",
                 tensor(model, base + "mlp.fc1.bias"),
-                tokens, embedding, embedding * 4,
-                true, false,
-                half_tensor(model, base + "mlp.fc1.weight"));
-            operators.linear(
-                branch, hidden,
-                tensor(model, base + "mlp.fc2.weight"),
+                tokens, embedding, embedding * 4, true);
+            linear_model(model, operators, branch, hidden,
+                base + "mlp.fc2.weight",
                 tensor(model, base + "mlp.fc2.bias"),
-                tokens, embedding * 4, embedding,
-                false, false,
-                half_tensor(model, base + "mlp.fc2.weight"));
+                tokens, embedding * 4, embedding);
             operators.add_scaled(
                 next, current, branch,
                 tensor(model, base + "gamma_2"),

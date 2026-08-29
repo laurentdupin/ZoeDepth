@@ -26,6 +26,26 @@ const VulkanBuffer& tensor(
     return model.tensor(name).buffer;
 }
 
+void linear_model(
+    GpuModel& model, VulkanOperators& operators,
+    VulkanBuffer& output, const VulkanBuffer& input,
+    const std::string& weight_name, const std::string& bias_name,
+    std::uint32_t rows, std::uint32_t input_columns,
+    std::uint32_t output_columns, bool gelu = false) {
+    const GpuTensor& weight = model.tensor(weight_name);
+    const VulkanBuffer& bias = tensor(model, bias_name);
+    if (model.uses_int8_weights() &&
+        weight.int8_buffer.handle() != VK_NULL_HANDLE) {
+        operators.linear_int8(output, input, weight.int8_buffer,
+            weight.int8_scales, bias, rows, input_columns,
+            output_columns, gelu);
+    } else {
+        operators.linear(output, input, weight.buffer, bias, rows,
+            input_columns, output_columns, gelu, false,
+            weight.half_precision);
+    }
+}
+
 GpuFeature clone(
     VulkanContext& context, const GpuFeature& input) {
     GpuFeature output{
@@ -214,10 +234,8 @@ GpuFeature postprocess(
     VulkanBuffer projected = context.create_device_buffer(
         std::uint64_t(patches) * 1024 * sizeof(float));
     operators.readout_concat(joined, capture, patches, 1024);
-    operators.linear(
-        projected, joined,
-        tensor(model, base + ".0.project.0.weight"),
-        tensor(model, base + ".0.project.0.bias"),
+    linear_model(model, operators, projected, joined,
+        base + ".0.project.0.weight", base + ".0.project.0.bias",
         patches, 2048, 1024, true);
     GpuFeature image{
         context.create_device_buffer(
@@ -324,11 +342,10 @@ VulkanBuffer route_nk(
                 std::to_string(layer);
             VulkanBuffer qkv =
                 context.create_device_buffer(token_bytes * 3);
-            operators.linear(
-                qkv, tokens,
-                tensor(model, base + ".self_attn.in_proj_weight"),
-                tensor(model, base + ".self_attn.in_proj_bias"),
-                token_count, 128, 384, false);
+            linear_model(model, operators, qkv, tokens,
+                base + ".self_attn.in_proj_weight",
+                base + ".self_attn.in_proj_bias",
+                token_count, 128, 384);
             VulkanBuffer query = context.create_device_buffer(token_bytes);
             VulkanBuffer key = context.create_device_buffer(token_bytes);
             VulkanBuffer values = context.create_device_buffer(token_bytes);
@@ -339,11 +356,10 @@ VulkanBuffer route_nk(
                 attended, query, key, values,
                 token_count, token_count, 4, 32);
             VulkanBuffer projected = context.create_device_buffer(token_bytes);
-            operators.linear(
-                projected, attended,
-                tensor(model, base + ".self_attn.out_proj.weight"),
-                tensor(model, base + ".self_attn.out_proj.bias"),
-                token_count, 128, 128, false);
+            linear_model(model, operators, projected, attended,
+                base + ".self_attn.out_proj.weight",
+                base + ".self_attn.out_proj.bias",
+                token_count, 128, 128);
             operators.add(
                 projected, projected, tokens,
                 token_count * 128);
@@ -356,19 +372,15 @@ VulkanBuffer route_nk(
                 token_count, 128, 1.0e-5f);
             VulkanBuffer hidden = context.create_device_buffer(
                 std::uint64_t(token_count) * 1024 * sizeof(float));
-            operators.linear(
-                hidden, normalized,
-                tensor(model, base + ".linear1.weight"),
-                tensor(model, base + ".linear1.bias"),
-                token_count, 128, 1024, false);
+            linear_model(model, operators, hidden, normalized,
+                base + ".linear1.weight", base + ".linear1.bias",
+                token_count, 128, 1024);
             operators.relu(hidden, hidden, token_count * 1024);
             VulkanBuffer feed_forward =
                 context.create_device_buffer(token_bytes);
-            operators.linear(
-                feed_forward, hidden,
-                tensor(model, base + ".linear2.weight"),
-                tensor(model, base + ".linear2.bias"),
-                token_count, 1024, 128, false);
+            linear_model(model, operators, feed_forward, hidden,
+                base + ".linear2.weight", base + ".linear2.bias",
+                token_count, 1024, 128);
             operators.add(
                 feed_forward, feed_forward, normalized,
                 token_count * 128);
@@ -382,18 +394,14 @@ VulkanBuffer route_nk(
         }
         VulkanBuffer hidden =
             context.create_device_buffer(128 * sizeof(float));
-        operators.linear(
-            hidden, tokens,
-            tensor(model, "mlp_classifier.0.weight"),
-            tensor(model, "mlp_classifier.0.bias"),
-            1, 128, 128, false);
+        linear_model(model, operators, hidden, tokens,
+            "mlp_classifier.0.weight", "mlp_classifier.0.bias",
+            1, 128, 128);
         operators.relu(hidden, hidden, 128);
         logits = context.create_device_buffer(2 * sizeof(float));
-        operators.linear(
-            logits, hidden,
-            tensor(model, "mlp_classifier.2.weight"),
-            tensor(model, "mlp_classifier.2.bias"),
-            1, 128, 2, false);
+        linear_model(model, operators, logits, hidden,
+            "mlp_classifier.2.weight", "mlp_classifier.2.bias",
+            1, 128, 2);
     });
     return logits;
 }

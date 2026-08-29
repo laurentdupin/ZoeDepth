@@ -77,6 +77,13 @@ if(ZOEDEPTH_WITH_VULKAN)
     zoedepth_compile_shader(reduce_minmax)
     zoedepth_compile_shader(normalize_inverse)
     zoedepth_compile_shader(depth_buffer_to_image)
+    foreach(SHARED_SHADER quantize_rows_int8 linear_int8_tiled)
+        inferbridge_compile_native_support_shader(
+            NAME "${SHARED_SHADER}" PREFIX zoe
+            GENERATED_DIR "${ZOEDEPTH_GENERATED_DIR}"
+            EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            OUT_VAR ZOEDEPTH_SHADER_HEADERS)
+    endforeach()
 endif()
 
 add_library(zoedepth_core STATIC
