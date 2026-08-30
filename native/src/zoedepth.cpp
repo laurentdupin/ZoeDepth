@@ -3,6 +3,9 @@
 #include "encoder_cpu.h"
 #include "graph_cpu.h"
 #include "model.h"
+#if defined(ZOEDEPTH_WITH_METAL)
+#include "metal_executor.h"
+#endif
 #if defined(ZOEDEPTH_WITH_VULKAN)
 #include "encoder_gpu.h"
 #include "gpu_model.h"
@@ -22,6 +25,9 @@
 
 struct zoedepth_context {
     std::unique_ptr<zoe_native::ModelFile> model;
+#if defined(ZOEDEPTH_WITH_METAL)
+    std::unique_ptr<zoe_native::MetalExecutor> metal;
+#endif
 #if defined(ZOEDEPTH_WITH_VULKAN)
     std::unique_ptr<zoe_native::VulkanContext> vulkan;
     std::unique_ptr<zoe_native::GpuModel> gpu_model;
@@ -231,6 +237,11 @@ std::vector<float> execute_prepared(
     const std::vector<float>& prepared,
     std::uint32_t width,
     std::uint32_t height) {
+#if defined(ZOEDEPTH_WITH_METAL)
+    if (context.metal) {
+        return context.metal->infer(prepared.data(), width, height);
+    }
+#endif
 #if defined(ZOEDEPTH_WITH_VULKAN)
     if (context.vulkan) {
         zoe_native::VulkanBuffer image =
@@ -287,7 +298,11 @@ uint32_t ZOEDEPTH_CALL zoedepth_abi_version(void) {
 }
 
 const char* ZOEDEPTH_CALL zoedepth_version_string(void) {
+#if defined(ZOEDEPTH_WITH_METAL)
+    return "0.6.0-zoed-n-k-nk-image-cpu-metal";
+#else
     return "0.5.0-zoed-n-k-nk-image-cpu-vulkan";
+#endif
 }
 
 zoedepth_status ZOEDEPTH_CALL zoedepth_create_vulkan(
@@ -304,7 +319,21 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_create_vulkan(
             "invalid ZoeDepth Vulkan creation input");
     }
     *context = nullptr;
-#if !defined(ZOEDEPTH_WITH_VULKAN)
+#if defined(ZOEDEPTH_WITH_METAL)
+    (void)device_index;
+    return protect([&] {
+        auto result = std::make_unique<zoedepth_context>();
+        const zoe_native::Variant native_variant =
+            variant == ZOEDEPTH_VARIANT_K ? zoe_native::Variant::k :
+            variant == ZOEDEPTH_VARIANT_NK ? zoe_native::Variant::nk :
+            zoe_native::Variant::n;
+        result->model = std::make_unique<zoe_native::ModelFile>(
+            path, native_variant);
+        result->metal = std::make_unique<zoe_native::MetalExecutor>(
+            *result->model);
+        *context = result.release();
+    });
+#elif !defined(ZOEDEPTH_WITH_VULKAN)
     (void)device_index;
     return fail(
         ZOEDEPTH_STATUS_UNSUPPORTED,

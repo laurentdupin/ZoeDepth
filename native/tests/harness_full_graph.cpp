@@ -98,9 +98,36 @@ int main() {
     input.native_handle_type = IBRH_NATIVE_HANDLE_HOST_POINTER;
     input.native_handle = static_cast<uint64_t>(
         reinterpret_cast<uintptr_t>(pixels.data()));
+    std::vector<float> depth(width * height);
+    ibrh_resource output{};
+    output.struct_size = sizeof(output);
+    output.api_version = IBRH_CURRENT_API_VERSION;
+    output.domain = IBRH_RESOURCE_DOMAIN_HOST;
+    output.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
+    output.access = IBRH_RESOURCE_ACCESS_WRITE;
+    output.pixel_format = IBRH_PIXEL_DEPTH_FLOAT32;
+    output.width = width;
+    output.height = height;
+    output.depth = 1u;
+    output.row_stride_bytes = width * sizeof(float);
+    output.byte_size = depth.size() * sizeof(float);
+    output.native_handle_type = IBRH_NATIVE_HANDLE_HOST_POINTER;
+    output.native_handle = static_cast<uint64_t>(
+        reinterpret_cast<uintptr_t>(depth.data()));
+    ibrh_synchronization no_synchronization{};
+    no_synchronization.struct_size = sizeof(no_synchronization);
+    no_synchronization.api_version = IBRH_CURRENT_API_VERSION;
+    no_synchronization.kind = IBRH_SYNC_NONE;
+    ibrh_transfer_binding input_binding{
+        sizeof(input_binding), IBRH_CURRENT_API_VERSION,
+        input, no_synchronization};
+    ibrh_transfer_binding output_binding{
+        sizeof(output_binding), IBRH_CURRENT_API_VERSION,
+        output, no_synchronization};
     ibrh_submit_request submit_request{
         sizeof(submit_request), IBRH_CURRENT_API_VERSION,
-        &input, 1u, nullptr, 0u, 123456u, 987654321u, {}};
+        &input_binding, 1u, &output_binding, 1u,
+        123456u, 987654321u, {}};
     ibrh_job* job = nullptr;
     if (!check(
             api.submit(
@@ -122,49 +149,20 @@ int main() {
             "job status/correlation failed"))
         return 5;
 
-    ibrh_output_descriptor descriptor{};
-    ibrh_output_lease* lease = nullptr;
-    if (!check(
-            api.output_acquire(
-                job, 0u, sizeof(descriptor), &descriptor, &lease) ==
-                IBRH_OK &&
-                lease != nullptr,
-            "output acquire failed"))
-        return 6;
     api.job_release(job);
     job = nullptr;
-    if (!check(
-            descriptor.payload_type == IBRH_PIXEL_DEPTH_UNORM8 &&
-                descriptor.source_frame_id ==
-                    submit_request.source_frame_id &&
-                descriptor.timestamp_ns == submit_request.timestamp_ns &&
-                descriptor.resource.domain ==
-                    IBRH_RESOURCE_DOMAIN_HOST &&
-                descriptor.resource.pixel_format ==
-                    IBRH_PIXEL_DEPTH_UNORM8 &&
-                descriptor.resource.width == width &&
-                descriptor.resource.height == height &&
-                descriptor.resource.native_handle != 0u &&
-                descriptor.resource.byte_size ==
-                    static_cast<uint64_t>(descriptor.resource.width) *
-                        descriptor.resource.height,
-            "output descriptor failed"))
-        return 7;
-    const auto* depth = reinterpret_cast<const uint8_t*>(
-        static_cast<uintptr_t>(descriptor.resource.native_handle));
-    uint8_t minimum = 255u;
-    uint8_t maximum = 0u;
-    for (uint64_t index = 0u;
-         index < descriptor.resource.byte_size; ++index) {
-        minimum = std::min(minimum, depth[index]);
-        maximum = std::max(maximum, depth[index]);
+    float minimum = 1.0f;
+    float maximum = 0.0f;
+    for (float value : depth) {
+        minimum = std::min(minimum, value);
+        maximum = std::max(maximum, value);
     }
-    if (!check(minimum == 0u && maximum == 255u, "output normalization failed"))
+    if (!check(minimum == 0.0f && maximum == 1.0f,
+            "output normalization failed"))
         return 8;
 
-    api.output_release(lease);
     api.model_unload(model);
     api.runtime_destroy(runtime);
-    std::cout << "InferBridge host lifecycle and lease passed\n";
+    std::cout << "InferBridge host transfer lifecycle passed\n";
     return 0;
 }

@@ -14,6 +14,15 @@ endif()
 
 option(ZOEDEPTH_WITH_VULKAN
     "Build the dependency-free Vulkan executor" ON)
+option(ZOEDEPTH_WITH_METAL
+    "Build the native Metal executor" ${APPLE})
+
+if(ZOEDEPTH_WITH_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "ZOEDEPTH_WITH_METAL requires Apple platforms")
+    endif()
+    enable_language(OBJCXX)
+endif()
 
 if(ZOEDEPTH_WITH_VULKAN)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
@@ -96,6 +105,17 @@ target_include_directories(zoedepth_core PUBLIC src)
 add_library(zoedepth_model SHARED
     src/zoedepth.cpp
     src/inferbridge_harness.cpp)
+if(ZOEDEPTH_WITH_METAL)
+    target_sources(zoedepth_model PRIVATE src/metal_executor.mm)
+    target_link_libraries(zoedepth_model PRIVATE
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalPerformanceShadersGraph")
+    target_compile_definitions(
+        zoedepth_model PRIVATE ZOEDEPTH_WITH_METAL=1)
+    set_source_files_properties(src/metal_executor.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+endif()
 if(ZOEDEPTH_WITH_VULKAN)
     target_sources(zoedepth_model PRIVATE
         src/vulkan.cpp src/operators.cpp src/gpu_model.cpp
@@ -146,6 +166,13 @@ add_executable(
     zoedepth_full_graph_probe tools/full_graph_probe.cpp)
 target_link_libraries(
     zoedepth_full_graph_probe PRIVATE zoedepth_model)
+
+if(ZOEDEPTH_WITH_METAL)
+    add_executable(
+        zoedepth_metal_parity_probe tools/metal_parity_probe.cpp)
+    target_link_libraries(
+        zoedepth_metal_parity_probe PRIVATE zoedepth_model)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
