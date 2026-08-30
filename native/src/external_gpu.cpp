@@ -200,26 +200,23 @@ public:
                     request.shared_texture_handle,
                     request.shared_texture_identity), request.width,
                 request.height, input_format, input_usage}, [&] {
-                    validate_texture(d3d12_.Get(),
-                        request.shared_texture_handle, request.width,
-                        request.height,
+                    validate_texture(d3d12_.Get(), request.shared_texture_handle,
+                        request.width, request.height,
                         request.rgba ? DXGI_FORMAT_R8G8B8A8_UNORM :
                                        DXGI_FORMAT_B8G8R8A8_UNORM,
                         "OpenSharedHandle(ZoeDepth input)");
                     return context_.import_d3d12_image(
                         reinterpret_cast<void*>(request.shared_texture_handle),
-                        request.width, request.height, input_format,
-                        input_usage);
+                        request.width, request.height, input_format, input_usage);
                 });
             VulkanImage& output = output_cache_.get_or_create({
                 inferbridge::native_harness::stable_resource_identity(
                     request.output_texture_handle,
                     request.output_texture_identity), request.output_width,
                 request.output_height, VK_FORMAT_R32_SFLOAT, output_usage}, [&] {
-                    validate_texture(d3d12_.Get(),
-                        request.output_texture_handle, request.output_width,
-                        request.output_height, DXGI_FORMAT_R32_FLOAT,
-                        "OpenSharedHandle(ZoeDepth output)");
+                    validate_texture(d3d12_.Get(), request.output_texture_handle,
+                        request.output_width, request.output_height,
+                        DXGI_FORMAT_R32_FLOAT, "OpenSharedHandle(ZoeDepth output)");
                     return context_.import_d3d12_image(
                         reinterpret_cast<void*>(request.output_texture_handle),
                         request.output_width, request.output_height,
@@ -255,17 +252,16 @@ public:
                             &graph_zero_);
                     };
                     GpuFeature direct = run(false);
-                    GpuFeature flipped = run(true);
                     const std::uint32_t output_count =
                         request.width * request.height;
                     VulkanBuffer combined = context_.create_device_buffer(
                         static_cast<std::uint64_t>(output_count) * sizeof(float));
                     io_.combine_depth(
-                        combined, direct.buffer, flipped.buffer,
+                        combined, direct.buffer, direct.buffer,
                         network_width, network_height,
                         padded_width, padded_height,
                         pad_width, pad_height,
-                        request.width, request.height);
+                        request.width, request.height, false);
                     io_.normalize_inverse(combined, output_count);
                     io_.write_depth(
                         output, combined, request.width, request.height);

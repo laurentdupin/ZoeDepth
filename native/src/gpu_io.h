@@ -30,7 +30,8 @@ public:
         std::uint32_t pad_width,
         std::uint32_t pad_height,
         std::uint32_t output_width,
-        std::uint32_t output_height);
+        std::uint32_t output_height,
+        bool blend_flipped);
     void normalize_inverse(VulkanBuffer& depth, std::uint32_t count);
     void write_depth(
         VulkanImage& destination, const VulkanBuffer& depth,

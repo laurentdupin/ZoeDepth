@@ -40,10 +40,13 @@ void main() {
     const uint x = gl_GlobalInvocationID.x;
     const uint y = gl_GlobalInvocationID.y;
     if (x >= p.output_width || y >= p.output_height) return;
+    const bool blend_flipped = (p.pad_height & 0x80000000u) != 0u;
+    const uint pad_height = p.pad_height & 0x7fffffffu;
     const float direct_x = float(x + p.pad_width);
     const float flipped_x = float(p.output_width - 1u - x + p.pad_width);
-    const float padded_y = float(y + p.pad_height);
-    output_data.values[y * p.output_width + x] = 0.5 * (
-        sample_depth(false, direct_x, padded_y) +
-        sample_depth(true, flipped_x, padded_y));
+    const float padded_y = float(y + pad_height);
+    const float direct = sample_depth(false, direct_x, padded_y);
+    output_data.values[y * p.output_width + x] = blend_flipped
+        ? 0.5 * (direct + sample_depth(true, flipped_x, padded_y))
+        : direct;
 }

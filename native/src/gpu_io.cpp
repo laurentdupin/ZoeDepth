@@ -85,7 +85,8 @@ void GpuIo::combine_depth(
     std::uint32_t pad_width,
     std::uint32_t pad_height,
     std::uint32_t output_width,
-    std::uint32_t output_height) {
+    std::uint32_t output_height,
+    bool blend_flipped) {
     if (output_width == 0u || output_height == 0u ||
         destination.size() < static_cast<std::uint64_t>(output_width) *
             output_height * sizeof(float) ||
@@ -103,6 +104,7 @@ void GpuIo::combine_depth(
     } parameters{
         network_width, network_height, padded_width, padded_height,
         output_width, output_height, pad_width, pad_height};
+    if (blend_flipped) parameters.pad_height |= 0x80000000u;
     context_.dispatch(
         combine_depth_, {&destination, &direct, &flipped},
         &parameters, sizeof(parameters),
