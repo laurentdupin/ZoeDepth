@@ -765,6 +765,10 @@ public:
         graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
         if (queue_ == nil || graph_device_ == nil)
             throw std::runtime_error("could not initialize ZoeDepth Metal");
+        inferbridge::native_harness::metal::label_queue(queue_, "ZoeDepth");
+        tensor_pool_ = std::make_shared<
+            inferbridge::native_harness::metal::AuxiliaryTensorPool>(
+                device_, "ZoeDepth");
         create_texture_pipelines();
     }
 
@@ -852,22 +856,31 @@ public:
         const uint32_t network_height=multiple32(scale_height*padded_height);
         std::lock_guard<std::mutex> lock(mutex_);
         @autoreleasepool {
-            id<MTLBuffer> input=[device_ newBufferWithLength:
-                static_cast<NSUInteger>(network_width)*network_height*3*sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> network_depth=[device_ newBufferWithLength:
-                static_cast<NSUInteger>(network_width)*network_height*sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> combined=[device_ newBufferWithLength:
-                static_cast<NSUInteger>(request.width)*request.height*sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            id<MTLBuffer> range=[device_ newBufferWithLength:2*sizeof(float)
-                options:MTLResourceStorageModePrivate];
-            if(!input||!network_depth||!combined||!range)throw std::bad_alloc();
+            auto tensors=tensor_pool_->acquire({
+                {{1,3,(NSInteger)network_height,(NSInteger)network_width},
+                    MPSDataTypeFloat32,sizeof(float),
+                    MTLResourceStorageModePrivate,"Network Input"},
+                {{1,1,(NSInteger)network_height,(NSInteger)network_width},
+                    MPSDataTypeFloat32,sizeof(float),
+                    MTLResourceStorageModePrivate,"Network Depth"},
+                {{1,1,(NSInteger)request.height,(NSInteger)request.width},
+                    MPSDataTypeFloat32,sizeof(float),
+                    MTLResourceStorageModePrivate,"Combined Depth"},
+                {{2},MPSDataTypeFloat32,sizeof(float),
+                    MTLResourceStorageModePrivate,"Depth Range"}});
+            id<MTLBuffer> input=tensors->buffer(0);
+            id<MTLBuffer> network_depth=tensors->buffer(1);
+            id<MTLBuffer> combined=tensors->buffer(2);
+            id<MTLBuffer> range=tensors->buffer(3);
+            prepared.retained_resources.push_back(tensors);
             id<MTLCommandBuffer> preprocess=[queue_ commandBuffer];
+            inferbridge::native_harness::metal::label_command(
+                preprocess,"ZoeDepth","Preprocess");
             if(prepared.wait_event)[preprocess encodeWaitForEvent:prepared.wait_event
                 value:request.wait_fence_value];
             id<MTLComputeCommandEncoder> encoder=[preprocess computeCommandEncoder];
+            inferbridge::native_harness::metal::label_encoder(
+                encoder,"ZoeDepth","Preprocess");
             struct PreprocessParameters{uint32_t sw,sh,dw,dh,pw,ph,padx,pady,rgba;} pp{
                 request.width,request.height,network_width,network_height,
                 padded_width,padded_height,pad_width,pad_height,request.rgba?1u:0u};
@@ -878,13 +891,8 @@ public:
             dispatch(encoder,preprocess_pipeline_,network_width,network_height);
             [encoder endEncoding];[preprocess commit];
             const Plan& plan=get_plan(network_width,network_height);
-            MPSGraphTensorData* input_data=[[MPSGraphTensorData alloc]
-                initWithMTLBuffer:input shape:shape({1,3,(NSInteger)network_height,
-                    (NSInteger)network_width}) dataType:MPSDataTypeFloat32];
-            MPSGraphTensorData* output_data=[[MPSGraphTensorData alloc]
-                initWithMTLBuffer:network_depth shape:shape({1,1,
-                    (NSInteger)network_height,(NSInteger)network_width})
-                    dataType:MPSDataTypeFloat32];
+            MPSGraphTensorData* input_data=tensors->data(0);
+            MPSGraphTensorData* output_data=tensors->data(1);
             MPSGraphExecutableExecutionDescriptor* execution=
                 [MPSGraphExecutableExecutionDescriptor new];
             execution.waitUntilCompleted=NO;
@@ -894,7 +902,11 @@ public:
             if(results.count!=1)
                 throw std::runtime_error("ZoeDepth Metal output binding failed");
             id<MTLCommandBuffer> completion=[queue_ commandBuffer];
+            inferbridge::native_harness::metal::label_command(
+                completion,"ZoeDepth","Combine and Present Depth");
             encoder=[completion computeCommandEncoder];
+            inferbridge::native_harness::metal::label_encoder(
+                encoder,"ZoeDepth","Combine and Present Depth");
             struct CombineParameters{uint32_t nw,nh,pw,ph,ow,oh,padx,pady;} cp{
                 network_width,network_height,padded_width,padded_height,
                 request.width,request.height,pad_width,pad_height};
@@ -1084,6 +1096,8 @@ kernel void output_depth(device const float*src[[buffer(0)]],device const float*
     id<MTLDevice> device_ = nil;
     id<MTLCommandQueue> queue_ = nil;
     MPSGraphDevice* graph_device_ = nil;
+    std::shared_ptr<inferbridge::native_harness::metal::AuxiliaryTensorPool>
+        tensor_pool_;
     std::unordered_map<PlanKey, Plan, PlanHash> plans_;
     std::mutex mutex_;
     id<MTLComputePipelineState> preprocess_pipeline_=nil;
