@@ -1,4 +1,5 @@
 #include "metal_executor.h"
+#include "inferbridge/native_harness_metal_texture.h"
 #include "inferbridge/native_harness_precision.h"
 
 #import <Foundation/Foundation.h>
@@ -33,6 +34,21 @@ MPSShape* shape(const TensorView& value) {
 NSString* ns(const std::string& value) {
     return [NSString stringWithUTF8String:value.c_str()];
 }
+
+class MetalExternalJob final : public ExternalJob {
+public:
+    explicit MetalExternalJob(
+        std::shared_ptr<inferbridge::native_harness::metal::Submission> value)
+        : submission_(std::move(value)) {}
+    ExternalJobState state() const override {
+        if (submission_->cancelled()) return ExternalJobState::cancelled;
+        return submission_->complete() ? ExternalJobState::complete :
+            ExternalJobState::running;
+    }
+    void cancel() override { submission_->cancel(); }
+private:
+    std::shared_ptr<inferbridge::native_harness::metal::Submission> submission_;
+};
 
 struct Image {
     MPSGraphTensor* value = nil;
@@ -749,6 +765,7 @@ public:
         graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
         if (queue_ == nil || graph_device_ == nil)
             throw std::runtime_error("could not initialize ZoeDepth Metal");
+        create_texture_pipelines();
     }
 
     std::vector<float> infer(
@@ -778,7 +795,207 @@ public:
         }
     }
 
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) {
+        if (!request.shared_texture_handle || !request.output_texture_handle ||
+            !request.signal_fence_handle || !request.signal_fence_value ||
+            request.width < 2u || request.height < 2u ||
+            request.output_width != request.width ||
+            request.output_height != request.height ||
+            !request.input_size || request.input_size % 32u != 0u)
+            throw std::invalid_argument("invalid ZoeDepth Metal texture request");
+        inferbridge::native_harness::metal::Prepared prepared;
+        prepared.input_texture=(__bridge id<MTLTexture>)(
+            reinterpret_cast<void*>(request.shared_texture_handle));
+        prepared.output_texture=(__bridge id<MTLTexture>)(
+            reinterpret_cast<void*>(request.output_texture_handle));
+        prepared.wait_event=request.wait_fence_handle?
+            (__bridge id<MTLSharedEvent>)(reinterpret_cast<void*>(
+                request.wait_fence_handle)):nil;
+        prepared.signal_event=(__bridge id<MTLSharedEvent>)(
+            reinterpret_cast<void*>(request.signal_fence_handle));
+        prepared.signal_value=request.signal_fence_value;
+        const MTLPixelFormat expected=request.rgba?MTLPixelFormatRGBA8Unorm:
+            MTLPixelFormatBGRA8Unorm;
+        if(prepared.input_texture.device.registryID!=device_.registryID||
+           prepared.output_texture.device.registryID!=device_.registryID||
+           prepared.input_texture.textureType!=MTLTextureType2D||
+           prepared.input_texture.width!=request.width||
+           prepared.input_texture.height!=request.height||
+           prepared.input_texture.pixelFormat!=expected||
+           prepared.output_texture.textureType!=MTLTextureType2D||
+           prepared.output_texture.width!=request.output_width||
+           prepared.output_texture.height!=request.output_height||
+           prepared.output_texture.pixelFormat!=MTLPixelFormatR32Float)
+            throw std::invalid_argument("ZoeDepth Metal texture descriptor mismatch");
+        const uint32_t pad_height=static_cast<uint32_t>(
+            std::sqrt(static_cast<double>(request.height)/2.0)*3.0);
+        const uint32_t pad_width=static_cast<uint32_t>(
+            std::sqrt(static_cast<double>(request.width)/2.0)*3.0);
+        if(pad_height>=request.height||pad_width>=request.width)
+            throw std::invalid_argument(
+                "image is too small for ZoeDepth reflection padding");
+        const uint32_t padded_width=request.width+2u*pad_width;
+        const uint32_t padded_height=request.height+2u*pad_height;
+        double scale_height=static_cast<double>(request.input_size)/padded_height;
+        double scale_width=static_cast<double>(request.input_size)/padded_width;
+        if(std::abs(1.0-scale_width)<std::abs(1.0-scale_height))
+            scale_height=scale_width;else scale_width=scale_height;
+        const auto multiple32=[](double value){return static_cast<uint32_t>(
+            std::max(32.0,std::nearbyint(value/32.0)*32.0));};
+        const uint32_t network_width=multiple32(scale_width*padded_width);
+        const uint32_t network_height=multiple32(scale_height*padded_height);
+        std::lock_guard<std::mutex> lock(mutex_);
+        @autoreleasepool {
+            id<MTLBuffer> input=[device_ newBufferWithLength:
+                static_cast<NSUInteger>(network_width)*network_height*3*sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> network_depth=[device_ newBufferWithLength:
+                static_cast<NSUInteger>(network_width)*network_height*sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> combined=[device_ newBufferWithLength:
+                static_cast<NSUInteger>(request.width)*request.height*sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> range=[device_ newBufferWithLength:2*sizeof(float)
+                options:MTLResourceStorageModePrivate];
+            if(!input||!network_depth||!combined||!range)throw std::bad_alloc();
+            id<MTLCommandBuffer> preprocess=[queue_ commandBuffer];
+            if(prepared.wait_event)[preprocess encodeWaitForEvent:prepared.wait_event
+                value:request.wait_fence_value];
+            id<MTLComputeCommandEncoder> encoder=[preprocess computeCommandEncoder];
+            struct PreprocessParameters{uint32_t sw,sh,dw,dh,pw,ph,padx,pady,rgba;} pp{
+                request.width,request.height,network_width,network_height,
+                padded_width,padded_height,pad_width,pad_height,request.rgba?1u:0u};
+            [encoder setComputePipelineState:preprocess_pipeline_];
+            [encoder setTexture:prepared.input_texture atIndex:0];
+            [encoder setBuffer:input offset:0 atIndex:0];
+            [encoder setBytes:&pp length:sizeof(pp) atIndex:1];
+            dispatch(encoder,preprocess_pipeline_,network_width,network_height);
+            [encoder endEncoding];[preprocess commit];
+            const Plan& plan=get_plan(network_width,network_height);
+            MPSGraphTensorData* input_data=[[MPSGraphTensorData alloc]
+                initWithMTLBuffer:input shape:shape({1,3,(NSInteger)network_height,
+                    (NSInteger)network_width}) dataType:MPSDataTypeFloat32];
+            MPSGraphTensorData* output_data=[[MPSGraphTensorData alloc]
+                initWithMTLBuffer:network_depth shape:shape({1,1,
+                    (NSInteger)network_height,(NSInteger)network_width})
+                    dataType:MPSDataTypeFloat32];
+            MPSGraphExecutableExecutionDescriptor* execution=
+                [MPSGraphExecutableExecutionDescriptor new];
+            execution.waitUntilCompleted=NO;
+            NSArray* results=[plan.executable runAsyncWithMTLCommandQueue:queue_
+                inputsArray:@[input_data] resultsArray:@[output_data]
+                executionDescriptor:execution];
+            if(results.count!=1)
+                throw std::runtime_error("ZoeDepth Metal output binding failed");
+            id<MTLCommandBuffer> completion=[queue_ commandBuffer];
+            encoder=[completion computeCommandEncoder];
+            struct CombineParameters{uint32_t nw,nh,pw,ph,ow,oh,padx,pady;} cp{
+                network_width,network_height,padded_width,padded_height,
+                request.width,request.height,pad_width,pad_height};
+            [encoder setComputePipelineState:combine_pipeline_];
+            [encoder setBuffer:combined offset:0 atIndex:0];
+            [encoder setBuffer:network_depth offset:0 atIndex:1];
+            [encoder setBytes:&cp length:sizeof(cp) atIndex:2];
+            dispatch(encoder,combine_pipeline_,request.width,request.height);
+            uint32_t count=request.width*request.height;
+            [encoder setComputePipelineState:reduce_pipeline_];
+            [encoder setBuffer:combined offset:0 atIndex:0];
+            [encoder setBuffer:range offset:0 atIndex:1];
+            [encoder setBytes:&count length:sizeof(count) atIndex:2];
+            dispatch(encoder,reduce_pipeline_,1,1);
+            struct OutputParameters{uint32_t width,height;} op{
+                request.width,request.height};
+            [encoder setComputePipelineState:output_pipeline_];
+            [encoder setBuffer:combined offset:0 atIndex:0];
+            [encoder setBuffer:range offset:0 atIndex:1];
+            [encoder setTexture:prepared.output_texture atIndex:0];
+            [encoder setBytes:&op length:sizeof(op) atIndex:2];
+            dispatch(encoder,output_pipeline_,request.width,request.height);
+            [encoder endEncoding];
+            [completion encodeSignalEvent:prepared.signal_event
+                value:prepared.signal_value];[completion commit];
+            return std::make_shared<MetalExternalJob>(
+                std::make_shared<inferbridge::native_harness::metal::Submission>(
+                    prepared,completion));
+        }
+    }
+
 private:
+    static void dispatch(id<MTLComputeCommandEncoder> encoder,
+        id<MTLComputePipelineState> pipeline,NSUInteger width,
+        NSUInteger height){
+        const NSUInteger x=pipeline.threadExecutionWidth;
+        const NSUInteger y=std::max<NSUInteger>(1,
+            pipeline.maxTotalThreadsPerThreadgroup/x);
+        [encoder dispatchThreads:MTLSizeMake(width,height,1)
+            threadsPerThreadgroup:MTLSizeMake(x,y,1)];
+    }
+
+    void create_texture_pipelines(){
+        static constexpr char source_text[]=R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+struct PreprocessParameters{uint sw,sh,dw,dh,pw,ph,padx,pady,rgba;};
+int reflect_index(int value,int size){int period=2*(size-1);value%=period;
+ if(value<0)value+=period;return value>=size?period-value:value;}
+float3 padded(texture2d<float,access::read>src,int x,int y,
+ constant PreprocessParameters&p){int sx=reflect_index(x-int(p.padx),int(p.sw));
+ int sy=reflect_index(y-int(p.pady),int(p.sh));return src.read(uint2(sx,sy)).rgb;}
+kernel void preprocess(texture2d<float,access::read>src[[texture(0)]],
+ device float*dst[[buffer(0)]],constant PreprocessParameters&p[[buffer(1)]],
+ uint2 q[[thread_position_in_grid]]){if(q.x>=p.dw||q.y>=p.dh)return;
+ float sx=p.dw>1?float(q.x)*float(p.pw-1)/float(p.dw-1):0.0f;
+ float sy=p.dh>1?float(q.y)*float(p.ph-1)/float(p.dh-1):0.0f;
+ int x0=int(floor(sx)),y0=int(floor(sy)),x1=min(x0+1,int(p.pw)-1),
+ y1=min(y0+1,int(p.ph)-1);float3 value=mix(mix(padded(src,x0,y0,p),
+ padded(src,x1,y0,p),fract(sx)),mix(padded(src,x0,y1,p),
+ padded(src,x1,y1,p),fract(sx)),fract(sy))*2.0f-1.0f;
+ uint plane=p.dw*p.dh,i=q.y*p.dw+q.x;dst[i]=value.r;
+ dst[plane+i]=value.g;dst[2*plane+i]=value.b;}
+float cubic(float d){const float a=-0.75f;d=abs(d);if(d<1.0f)
+ return ((a+2.0f)*d-(a+3.0f))*d*d+1.0f;if(d<2.0f)
+ return ((a*d-5.0f*a)*d+8.0f*a)*d-4.0f*a;return 0.0f;}
+struct CombineParameters{uint nw,nh,pw,ph,ow,oh,padx,pady;};
+float sample_depth(device const float*src,float px,float py,
+ constant CombineParameters&p){float sx=(px+0.5f)*float(p.nw)/float(p.pw)-0.5f;
+ float sy=(py+0.5f)*float(p.nh)/float(p.ph)-0.5f;int bx=int(floor(sx)),
+ by=int(floor(sy));float result=0.0f;for(int ky=-1;ky<=2;++ky){int iy=clamp(by+ky,0,
+ int(p.nh)-1);float wy=cubic(sy-float(by+ky));for(int kx=-1;kx<=2;++kx){
+ int ix=clamp(bx+kx,0,int(p.nw)-1);result+=src[uint(iy)*p.nw+uint(ix)]*
+ wy*cubic(sx-float(bx+kx));}}return result;}
+kernel void combine(device float*dst[[buffer(0)]],device const float*src[[buffer(1)]],
+ constant CombineParameters&p[[buffer(2)]],uint2 q[[thread_position_in_grid]]){
+ if(q.x>=p.ow||q.y>=p.oh)return;dst[q.y*p.ow+q.x]=sample_depth(src,
+ float(q.x+p.padx),float(q.y+p.pady),p);}
+kernel void reduce_range(device const float*src[[buffer(0)]],device float*range[[buffer(1)]],
+ constant uint&count[[buffer(2)]],uint gid[[thread_position_in_grid]]){if(gid)return;
+ float lo=INFINITY,hi=-INFINITY;for(uint i=0;i<count;++i){lo=min(lo,src[i]);
+ hi=max(hi,src[i]);}range[0]=lo;range[1]=hi;}
+struct OutputParameters{uint width,height;};
+kernel void output_depth(device const float*src[[buffer(0)]],device const float*range[[buffer(1)]],
+ texture2d<float,access::write>out[[texture(0)]],constant OutputParameters&p[[buffer(2)]],
+ uint2 q[[thread_position_in_grid]]){if(q.x>=p.width||q.y>=p.height)return;
+ float span=range[1]-range[0];float v=span>1.0e-12f?1.0f-clamp(
+ (src[q.y*p.width+q.x]-range[0])/span,0.0f,1.0f):1.0f;
+ out.write(float4(v),q);}
+)METAL";
+        NSError* error=nil;id<MTLLibrary> library=[device_ newLibraryWithSource:
+            [NSString stringWithUTF8String:source_text] options:nil error:&error];
+        if(!library)throw std::runtime_error(error.localizedDescription.UTF8String?:
+            "could not compile ZoeDepth Metal texture kernels");
+        auto make=[&](NSString*name){id<MTLComputePipelineState> result=
+            [device_ newComputePipelineStateWithFunction:
+                [library newFunctionWithName:name] error:&error];
+            if(!result)throw std::runtime_error(
+                error.localizedDescription.UTF8String?:
+                "could not create ZoeDepth Metal texture pipeline");
+            return result;
+        };
+        preprocess_pipeline_=make(@"preprocess");combine_pipeline_=make(@"combine");
+        reduce_pipeline_=make(@"reduce_range");output_pipeline_=make(@"output_depth");
+    }
+
     const Plan& get_plan(std::uint32_t width, std::uint32_t height) {
         const PlanKey key{static_cast<int>(width), static_cast<int>(height)};
         auto found = plans_.find(key);
@@ -865,6 +1082,10 @@ private:
     MPSGraphDevice* graph_device_ = nil;
     std::unordered_map<PlanKey, Plan, PlanHash> plans_;
     std::mutex mutex_;
+    id<MTLComputePipelineState> preprocess_pipeline_=nil;
+    id<MTLComputePipelineState> combine_pipeline_=nil;
+    id<MTLComputePipelineState> reduce_pipeline_=nil;
+    id<MTLComputePipelineState> output_pipeline_=nil;
 };
 
 MetalExecutor::MetalExecutor(const ModelFile& model)
@@ -873,6 +1094,10 @@ MetalExecutor::~MetalExecutor() = default;
 std::vector<float> MetalExecutor::infer(
     const float* input, std::uint32_t width, std::uint32_t height) {
     return impl_->infer(input, width, height);
+}
+std::shared_ptr<ExternalJob> MetalExecutor::submit_texture(
+    const ExternalTextureRequest& request) {
+    return impl_->submit_texture(request);
 }
 
 }  // namespace zoe_native

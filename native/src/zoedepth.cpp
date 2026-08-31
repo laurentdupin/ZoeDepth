@@ -5,6 +5,7 @@
 #include "model.h"
 #if defined(ZOEDEPTH_WITH_METAL)
 #include "metal_executor.h"
+#include "zoedepth_internal.h"
 #endif
 #if defined(ZOEDEPTH_WITH_VULKAN)
 #include "encoder_gpu.h"
@@ -290,6 +291,33 @@ void normalize_inverse(std::vector<float>& values) {
     }
 }
 }
+
+#if defined(ZOEDEPTH_WITH_METAL)
+namespace zoe_native {
+class ContextMetalExternalGpu final : public ExternalGpu {
+public:
+    explicit ContextMetalExternalGpu(zoedepth_context* context)
+        : context_(context) {
+        if(!context_||!context_->metal)
+            throw std::invalid_argument("ZoeDepth Metal context is unavailable");
+    }
+    ExternalGpuCapabilities capabilities() const override{return {true,0u,3u};}
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) override {
+        return context_->metal->submit_texture(request);
+    }
+    void transfer_counters(std::uint64_t&up,std::uint64_t&down)const override{
+        up=0u;down=0u;
+    }
+private:
+    zoedepth_context* context_;
+};
+std::shared_ptr<ExternalGpu> create_metal_external_gpu(
+    zoedepth_context* context){
+    return std::make_shared<ContextMetalExternalGpu>(context);
+}
+}  // namespace zoe_native
+#endif
 
 extern "C" {
 
