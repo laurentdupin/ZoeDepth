@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace zoe_native {
@@ -15,6 +16,8 @@ public:
     ~MetalExecutor();
     MetalExecutor(const MetalExecutor&) = delete;
     MetalExecutor& operator=(const MetalExecutor&) = delete;
+
+    void set_cache_path(const std::string& cache_path);
 
     std::vector<float> infer(
         const float* normalized_rgb_chw,

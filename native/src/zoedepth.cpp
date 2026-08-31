@@ -313,7 +313,10 @@ private:
     zoedepth_context* context_;
 };
 std::shared_ptr<ExternalGpu> create_metal_external_gpu(
-    zoedepth_context* context){
+    zoedepth_context* context, const std::string& cache_path){
+    if (!context || !context->metal)
+        throw std::invalid_argument("ZoeDepth Metal context is unavailable");
+    context->metal->set_cache_path(cache_path);
     return std::make_shared<ContextMetalExternalGpu>(context);
 }
 }  // namespace zoe_native

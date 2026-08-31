@@ -768,6 +768,11 @@ public:
         create_texture_pipelines();
     }
 
+    void set_cache_path(const std::string& cache_path) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        cache_path_ = cache_path;
+    }
+
     std::vector<float> infer(
         const float* input, std::uint32_t width, std::uint32_t height) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1051,11 +1056,10 @@ kernel void output_depth(device const float*src[[buffer(0)]],device const float*
 
     NSURL* cache_url(const PlanKey& key) const {
         if (@available(macOS 14.0, *)) {
-            NSArray<NSString*>* dirs = NSSearchPathForDirectoriesInDomains(
-                NSCachesDirectory, NSUserDomainMask, YES);
-            if (dirs.count == 0) return nil;
-            NSString* directory = [dirs.firstObject stringByAppendingPathComponent:
-                @"DepthExtractor/ZoeDepthMetalGraphCache-v2"];
+            if (cache_path_.empty()) return nil;
+            NSString* directory = [[NSString
+                stringWithUTF8String:cache_path_.c_str()]
+                stringByAppendingPathComponent:@"ZoeDepthMetalGraphCache-v2"];
             if (![[NSFileManager defaultManager] createDirectoryAtPath:directory
                     withIntermediateDirectories:YES attributes:nil error:nil])
                 return nil;
@@ -1086,11 +1090,15 @@ kernel void output_depth(device const float*src[[buffer(0)]],device const float*
     id<MTLComputePipelineState> combine_pipeline_=nil;
     id<MTLComputePipelineState> reduce_pipeline_=nil;
     id<MTLComputePipelineState> output_pipeline_=nil;
+    std::string cache_path_;
 };
 
 MetalExecutor::MetalExecutor(const ModelFile& model)
     : impl_(std::make_unique<Impl>(model)) {}
 MetalExecutor::~MetalExecutor() = default;
+void MetalExecutor::set_cache_path(const std::string& cache_path) {
+    impl_->set_cache_path(cache_path);
+}
 std::vector<float> MetalExecutor::infer(
     const float* input, std::uint32_t width, std::uint32_t height) {
     return impl_->infer(input, width, height);

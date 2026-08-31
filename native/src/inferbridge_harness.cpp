@@ -28,6 +28,7 @@ struct ibrh_job;
 
 struct ibrh_runtime {
     std::string error;
+    std::string cache_path;
     int32_t vulkan_device_index = 0;
     uint64_t adapter_luid = 0u;
     bool force_host_transfers = false;
@@ -304,6 +305,7 @@ ibrh_result IBRH_CALL runtime_create(
         return IBRH_ERROR_STRUCT_TOO_SMALL;
     auto* runtime = new (std::nothrow) ibrh_runtime();
     if (runtime == nullptr) return IBRH_ERROR_INTERNAL;
+    runtime->cache_path = copy_string(request->cache_path);
     const std::string device = copy_string(request->requested_device_json);
     std::string transfer_mode;
     runtime->force_host_transfers =
@@ -402,8 +404,9 @@ ibrh_result IBRH_CALL model_load(
         }
 #if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
         if(!runtime->force_host_transfers){
-            try{model->external_gpu=
-                    zoe_native::create_metal_external_gpu(model->context);
+                try{model->external_gpu=
+                    zoe_native::create_metal_external_gpu(
+                        model->context, runtime->cache_path);
                 model->worker=std::thread(metal_worker_loop,model);
             }catch(const std::exception&error){zoedepth_destroy(model->context);
                 delete model;return fail(runtime,
