@@ -588,6 +588,9 @@ ibrh_result IBRH_CALL submit(ibrh_model* model, size_t request_size,
     if(status!=ZOEDEPTH_STATUS_OK)
         return fail(model->runtime,status_result(status),zoedepth_last_error());
     auto* job=new(std::nothrow)ibrh_job();if(!job)return IBRH_ERROR_INTERNAL;
+#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
+    job->state.store(IBRH_JOB_COMPLETE);
+#endif
     job->source_frame_id=request->source_frame_id;job->timestamp_ns=request->timestamp_ns;
     job->width=input.width;job->height=input.height;*output=job;return IBRH_OK;
 }
