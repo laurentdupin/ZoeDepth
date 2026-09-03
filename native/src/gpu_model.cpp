@@ -1,5 +1,6 @@
 #include "gpu_model.h"
 #include "inferbridge/native_harness_precision.h"
+#include "inferbridge/native_harness_vulkan_initialization.h"
 
 #include <cstring>
 #include <limits>
@@ -80,7 +81,19 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
                        : inferbridge::native::Precision::fp32);
     const bool compact_weights =
         precision_ == inferbridge::native::Precision::fp16;
-    for (std::string_view name : model.tensor_names()) {
+    const std::vector<std::string_view> tensor_names = model.tensor_names();
+    inferbridge::native_harness::batch_vulkan_initialization_uploads(
+        context, tensor_names,
+        [&](std::string_view name) {
+            const TensorView& source = model.tensor(name);
+            // INT8 currently retains the source representation and adds a
+            // quantized representation. Budget for both so staging memory
+            // remains bounded during initialization.
+            const std::uint64_t bytes_per_element =
+                precision_ == inferbridge::native::Precision::int8 ? 5u : 4u;
+            return source.elements * bytes_per_element;
+        },
+        [&](std::string_view name) {
         const TensorView& source = model.tensor(name);
         if (source.elements >
             std::numeric_limits<std::size_t>::max() / sizeof(float)) {
@@ -129,7 +142,7 @@ GpuModel::GpuModel(const ModelFile& model, VulkanContext& context) {
             throw std::runtime_error(
                 "duplicate GPU tensor name: " + std::string(name));
         }
-    }
+        });
 }
 
 const GpuTensor& GpuModel::tensor(std::string_view name) const {
