@@ -230,6 +230,7 @@ public:
 
 private:
     VulkanContext& context_;
+    bool preserve_scalar_layer_norm_order_ = false;
     inferbridge::native::Int8ActivationWorkspace<VulkanBuffer> int8_workspace_;
     VulkanPipeline linear_;
     VulkanPipeline linear16_;
@@ -242,6 +243,7 @@ private:
     VulkanPipeline linear_int8_tiled_;
     VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
+    VulkanPipeline layer_norm_parallel_;
     VulkanPipeline add_scaled_;
     VulkanPipeline bmm_;
     VulkanPipeline bmm_score_half_;

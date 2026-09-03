@@ -85,7 +85,8 @@ if(ZOEDEPTH_WITH_VULKAN)
     zoedepth_compile_shader(reduce_minmax)
     zoedepth_compile_shader(normalize_inverse)
     zoedepth_compile_shader(depth_buffer_to_image)
-    foreach(SHARED_SHADER conv2d_tiled4 quantize_rows_int8 linear_int8_tiled)
+    foreach(SHARED_SHADER conv2d_tiled4 quantize_rows_int8 linear_int8_tiled
+            layer_norm_parallel)
         inferbridge_compile_native_support_shader(
             NAME "${SHARED_SHADER}" PREFIX zoe
             GENERATED_DIR "${ZOEDEPTH_GENERATED_DIR}"
