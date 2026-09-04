@@ -4,7 +4,8 @@ layout(set=0,binding=0,std430) writeonly buffer O{float d[];}o;
 layout(set=0,binding=1,std430) readonly buffer I{vec4 d[];}i;
 layout(set=0,binding=2,std430) readonly buffer W{vec4 d[];}w;
 layout(set=0,binding=3,std430) readonly buffer B{float d[];}b;
-layout(push_constant) uniform P{uint rows;uint inputs;uint outputs;}p;
+layout(push_constant) uniform P{uint rows;uint inputs;uint outputs;uint gelu;}p;
+#include "gelu_common.glsl"
 #define K 8
 #define KS 9
 shared vec4 it[24*KS];
@@ -43,6 +44,6 @@ void main(){
  for(uint r=0;r<3;++r){
   uint row=rb+r;if(row>=p.rows)continue;
   for(uint c=0;c<4;++c){uint col=cb+c*16;if(col<p.outputs)
-   o.d[row*p.outputs+col]=s[r][c]+b.d[col];}
+   {float v=s[r][c]+b.d[col];o.d[row*p.outputs+col]=p.gelu!=0?apply_gelu(v):v;}}
  }
 }
