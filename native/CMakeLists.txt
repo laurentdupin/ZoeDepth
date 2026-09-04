@@ -64,10 +64,12 @@ if(ZOEDEPTH_WITH_VULKAN)
             add_scaled add add_position bilinear_align_true
             bilinear_align_true_image bmm bmm_score_half bmm_value_half
             conv2d conv2d8 conv2d_half conv2d8_half conv2d_tiled
-            conv_transpose_nonoverlap conv_transpose_nonoverlap_half
+            conv2d_tiled4
+            conv_transpose_nonoverlap conv_transpose_nonoverlap4
+            conv_transpose_nonoverlap_half conv_transpose_nonoverlap4_half
             elementwise gelu layer_norm linear linear16 linear_half
             linear16_half linear_vec8 linear_vec8_rows24
-            linear_vec8_rows24_half
+            linear_vec8_rows24_half linear_int8_tiled16
             prepare_tokens position_bicubic project_tokens
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
             group_norm silu nearest concatenate add_channel nchw_tokens
@@ -85,7 +87,7 @@ if(ZOEDEPTH_WITH_VULKAN)
     zoedepth_compile_shader(reduce_minmax)
     zoedepth_compile_shader(normalize_inverse)
     zoedepth_compile_shader(depth_buffer_to_image)
-    foreach(SHARED_SHADER conv2d_tiled4 quantize_rows_int8 linear_int8_tiled
+    foreach(SHARED_SHADER quantize_rows_int8 linear_int8_tiled
             layer_norm_parallel)
         inferbridge_compile_native_support_shader(
             NAME "${SHARED_SHADER}" PREFIX zoe

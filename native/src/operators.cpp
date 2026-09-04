@@ -17,7 +17,9 @@
 #include "conv2d_tiled_spv.h"
 #include "conv2d_tiled4_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
+#include "conv_transpose_nonoverlap4_spv.h"
 #include "conv_transpose_nonoverlap_half_spv.h"
+#include "conv_transpose_nonoverlap4_half_spv.h"
 #include "gelu_spv.h"
 #include "layer_norm_spv.h"
 #include "layer_norm_parallel_spv.h"
@@ -29,6 +31,7 @@
 #include "linear_vec8_rows24_spv.h"
 #include "linear_vec8_rows24_half_spv.h"
 #include "linear_int8_tiled_spv.h"
+#include "linear_int8_tiled16_spv.h"
 #include "quantize_rows_int8_spv.h"
 #include "inferbridge/native_harness_precision.h"
 #include "prepare_tokens_spv.h"
@@ -161,6 +164,13 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           ? context.create_pipeline(zoe_linear_int8_tiled_spv,
                 zoe_linear_int8_tiled_spv_size, 6, 28)
           : VulkanPipeline{}),
+      linear_int8_tiled16_(
+          context.supports_packed_int8_dot() &&
+              inferbridge::native::requested_precision() ==
+                  inferbridge::native::Precision::int8
+          ? context.create_pipeline(zoe_linear_int8_tiled16_spv,
+                zoe_linear_int8_tiled16_spv_size, 6, 28)
+          : VulkanPipeline{}),
       gelu_(context.create_pipeline(
           zoe_gelu_spv, zoe_gelu_spv_size, 2, 4)),
       layer_norm_(context.create_pipeline(
@@ -255,9 +265,19 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           zoe_conv_transpose_nonoverlap_spv_size,
           4,
           24)),
+      conv_transpose_nonoverlap4_(context.create_pipeline(
+          zoe_conv_transpose_nonoverlap4_spv,
+          zoe_conv_transpose_nonoverlap4_spv_size,
+          4,
+          24)),
       conv_transpose_nonoverlap_half_(context.create_pipeline(
           zoe_conv_transpose_nonoverlap_half_spv,
           zoe_conv_transpose_nonoverlap_half_spv_size,
+          4,
+          24)),
+      conv_transpose_nonoverlap4_half_(context.create_pipeline(
+          zoe_conv_transpose_nonoverlap4_half_spv,
+          zoe_conv_transpose_nonoverlap4_half_spv_size,
           4,
           24)),
       bilinear_align_true_(context.create_pipeline(
@@ -374,8 +394,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv2d_tiled4_.set_debug_name("conv2d_tiled4");
     conv_transpose_nonoverlap_.set_debug_name(
         "conv_transpose_nonoverlap");
+    conv_transpose_nonoverlap4_.set_debug_name(
+        "conv_transpose_nonoverlap4");
     conv_transpose_nonoverlap_half_.set_debug_name(
         "conv_transpose_nonoverlap_half");
+    conv_transpose_nonoverlap4_half_.set_debug_name(
+        "conv_transpose_nonoverlap4_half");
     bilinear_align_true_.set_debug_name(
         "bilinear_align_true");
     bilinear_align_true_image_.set_debug_name(
@@ -418,7 +442,7 @@ void VulkanOperators::linear_int8(
         &input_columns, sizeof(input_columns), rows);
     const std::uint32_t parameters[7] = {
         rows, input_columns, output_columns, 0u, output_columns, 0u, 1u};
-    context_.dispatch(linear_int8_tiled_,
+    context_.dispatch(rows >= 32u ? linear_int8_tiled16_ : linear_int8_tiled_,
         {&output, &packed_input, &packed_weight, &input_scales,
          &weight_scales, &bias}, parameters, sizeof(parameters),
         divide_up(output_columns, 64u), divide_up(rows, 56u));
@@ -460,25 +484,21 @@ void VulkanOperators::linear(
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
     context_.dispatch(
-        context_.subgroup_size() == 32 && rows <= 32
+        context_.subgroup_size() == 32
             ? (half_weight
                 ? linear_vec8_rows24_half_
-                : linear_vec8_rows24_)
-            : !half_weight && context_.subgroup_size() == 32
-            ? linear_vec8_
+                : rows <= 32 ? linear_vec8_rows24_ : linear_vec8_)
             : (half_weight
             ? (block16 ? linear16_half_ : linear_half_)
             : (block16 ? linear16_ : linear_)),
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        context_.subgroup_size() == 32 &&
-                (!half_weight || rows <= 32)
+        context_.subgroup_size() == 32
             ? divide_up(output_columns, 64)
             : divide_up(divide_up(output_columns, 4), 8),
-        context_.subgroup_size() == 32 &&
-                (!half_weight || rows <= 32)
-            ? divide_up(rows, rows <= 32 ? 24 : 40)
+        context_.subgroup_size() == 32
+            ? divide_up(rows, half_weight || rows <= 32 ? 24 : 40)
             : divide_up(divide_up(rows, 4), 8));
     if (gelu) {
         struct GeluParameters {
@@ -1055,14 +1075,14 @@ void VulkanOperators::conv_transpose_nonoverlap(
         output_channels, kernel, batches};
     context_.dispatch(
         half_weight
-            ? conv_transpose_nonoverlap_half_
-            : conv_transpose_nonoverlap_,
+            ? conv_transpose_nonoverlap4_half_
+            : conv_transpose_nonoverlap4_,
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
         divide_up(output_width, 8),
         divide_up(output_height, 8),
-        output_channels * batches);
+        divide_up(output_channels, 4) * batches);
 }
 
 void VulkanOperators::bilinear_align_true(
