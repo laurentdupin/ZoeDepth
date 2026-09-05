@@ -1,3 +1,8 @@
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "linux_capture.h"
+#include <inferbridge/linux_capture_preprocess.h>
+#include "gpu_io.h"
+#endif
 #include "zoedepth_native.h"
 
 #include "encoder_cpu.h"
@@ -486,7 +491,11 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_infer_rgb_f32(
     });
 }
 
+#if defined(__linux__) && !defined(__ANDROID__)
+static zoedepth_status zoedepth_infer_bgra8_f32_linux_impl(
+#else
 zoedepth_status ZOEDEPTH_CALL zoedepth_infer_bgra8_f32(
+#endif
     zoedepth_context* context,
     const uint8_t* bgra,
     uint64_t bgra_stride_bytes,
@@ -494,8 +503,16 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_infer_bgra8_f32(
     int32_t height,
     int32_t model_size,
     float* depth,
-    uint64_t depth_elements) {
-    if (!context || !context->model || !bgra || !depth ||
+    uint64_t depth_elements
+#if defined(__linux__) && !defined(__ANDROID__)
+    , const inferbridge::linux_capture::LinuxDmaBufImage* capture
+#endif
+    ) {
+    if (!context || !context->model || (!bgra
+#if defined(__linux__) && !defined(__ANDROID__)
+        && !capture
+#endif
+        ) || !depth ||
         width <= 1 || height <= 1 ||
         model_size <= 0 || model_size % 32 != 0 ||
         bgra_stride_bytes <
@@ -532,6 +549,21 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_infer_bgra8_f32(
             std::uint64_t(padded_width) * padded_height;
 
         auto run_pass = [&](bool flip) {
+#if defined(__linux__) && !defined(__ANDROID__) && defined(ZOEDEPTH_WITH_VULKAN)
+            if(capture) {
+                zoe_native::GpuIo io(*context->vulkan);
+                auto image=inferbridge::linux_capture::preprocess_capture(*context->vulkan,*capture,network_width,network_height,
+                    [&](auto& tensor,const auto& source,auto w,auto h) {
+                        io.preprocess(tensor,source,w,h,padded_width,padded_height,pad_w,pad_h,flip);
+                    });
+                auto result=zoe_native::full_graph_gpu(*context->vulkan,*context->gpu_model,*context->operators,
+                    zoe_native::encoder_gpu(*context->vulkan,*context->gpu_model,*context->operators,image,network_width,network_height));
+                std::vector<float> prediction(uint64_t(network_width)*network_height);
+                context->vulkan->download(result.buffer,prediction.data(),prediction.size()*sizeof(float));
+                return resize_bicubic_align_corners_false(prediction,network_width,network_height,padded_width,padded_height);
+            }
+#endif
+
             std::vector<float> padded(
                 static_cast<std::size_t>(3 * padded_plane));
             for (std::uint32_t y = 0; y < padded_height; ++y) {
@@ -598,3 +630,5 @@ zoedepth_status ZOEDEPTH_CALL zoedepth_infer_bgra8_f32(
 }
 
 }
+
+#include "linux_capture.inl"
