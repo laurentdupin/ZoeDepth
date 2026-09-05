@@ -43,6 +43,7 @@ if(ZOEDEPTH_WITH_VULKAN)
             DEPENDS
                 "${SOURCE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/indexing.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/gelu_common.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/conv2d_common.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/linear_common.glsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/project_tokens_common.glsl"

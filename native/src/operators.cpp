@@ -111,33 +111,33 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           inferbridge::native::requested_precision() ==
           inferbridge::native::Precision::int8),
       linear_(context.create_pipeline(
-          zoe_linear_spv, zoe_linear_spv_size, 4, 12)),
+          zoe_linear_spv, zoe_linear_spv_size, 4, 16)),
       linear16_(context.create_pipeline(
-          zoe_linear16_spv, zoe_linear16_spv_size, 4, 12)),
+          zoe_linear16_spv, zoe_linear16_spv_size, 4, 16)),
       linear_half_(context.create_pipeline(
-          zoe_linear_half_spv, zoe_linear_half_spv_size, 4, 12)),
+          zoe_linear_half_spv, zoe_linear_half_spv_size, 4, 16)),
       linear16_half_(context.create_pipeline(
           zoe_linear16_half_spv,
           zoe_linear16_half_spv_size,
           4,
-          12)),
+          16)),
       linear_vec8_(context.create_pipeline(
           zoe_linear_vec8_spv,
           zoe_linear_vec8_spv_size,
           4,
-          12)),
+          16)),
       linear_vec8_rows24_(context.create_pipeline(
           zoe_linear_vec8_rows24_spv,
           zoe_linear_vec8_rows24_spv_size,
           4,
-          12)),
+          16)),
       linear_vec8_rows24_half_(
           context.float16_storage()
               ? context.create_pipeline(
                     zoe_linear_vec8_rows24_half_spv,
                     zoe_linear_vec8_rows24_half_spv_size,
                     4,
-                    12)
+                    16)
               : VulkanPipeline{}),
       quantize_rows_int8_(
           context.supports_packed_int8_dot() &&
@@ -482,7 +482,8 @@ void VulkanOperators::linear(
         std::uint32_t rows;
         std::uint32_t input_columns;
         std::uint32_t output_columns;
-    } parameters{rows, input_columns, output_columns};
+        std::uint32_t gelu;
+    } parameters{rows, input_columns, output_columns, gelu ? 1u : 0u};
     context_.dispatch(
         context_.subgroup_size() == 32
             ? (half_weight
@@ -500,17 +501,6 @@ void VulkanOperators::linear(
         context_.subgroup_size() == 32
             ? divide_up(rows, half_weight || rows <= 32 ? 24 : 40)
             : divide_up(divide_up(rows, 4), 8));
-    if (gelu) {
-        struct GeluParameters {
-            std::uint32_t count;
-        } gelu_parameters{rows * output_columns};
-        context_.dispatch(
-            gelu_,
-            {&output, &output},
-            &gelu_parameters,
-            sizeof(gelu_parameters),
-            divide_up(gelu_parameters.count, 256));
-    }
 }
 
 void VulkanOperators::layer_norm(

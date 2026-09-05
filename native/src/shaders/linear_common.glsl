@@ -31,7 +31,10 @@ layout(push_constant) uniform Parameters {
     uint rows;
     uint input_columns;
     uint output_columns;
+    uint gelu;
 } parameters;
+
+#include "gelu_common.glsl"
 
 #define K_STRIDE (K_TILE + 1)
 shared float input_tile[32 * K_STRIDE];
@@ -113,9 +116,12 @@ void main() {
         for (uint column = 0; column < 4; ++column) {
             const uint output_column = column_base + column;
             if (output_column < parameters.output_columns) {
+                float value = sums[row][column] +
+                    bias_buffer.data[output_column];
+                if (parameters.gelu != 0u) value = apply_gelu(value);
                 output_buffer.data[
                     output_row * parameters.output_columns + output_column] =
-                    sums[row][column] + bias_buffer.data[output_column];
+                    value;
             }
         }
     }
