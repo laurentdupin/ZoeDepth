@@ -25,6 +25,7 @@
 #include <vector>
 
 struct ibrh_job;
+class ZoeGpuWorker;
 
 struct ibrh_runtime {
     std::string error;
@@ -42,14 +43,10 @@ struct ibrh_model {
 #if defined(ZOEDEPTH_WITH_VULKAN) || defined(ZOEDEPTH_WITH_METAL)
     std::shared_ptr<zoe_native::ExternalGpu> external_gpu;
 #endif
-#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
     std::shared_ptr<std::atomic<uint32_t>> occupied_slots=
         std::make_shared<std::atomic<uint32_t>>(0u);
-    std::mutex queue_mutex;
-    std::condition_variable queue_condition;
-    std::deque<ibrh_job*> queue;
-    bool stopping=false;
-    std::thread worker;
+    std::shared_ptr<ZoeGpuWorker> gpu_worker;
 #endif
     uint32_t input_size = 384u;
     std::mutex submit_mutex;
@@ -60,18 +57,20 @@ struct ibrh_job {
 #if defined(ZOEDEPTH_WITH_VULKAN) || defined(ZOEDEPTH_WITH_METAL)
     std::shared_ptr<zoe_native::ExternalJob> gpu_job;
 #endif
-#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
     zoe_native::ExternalTextureRequest gpu_request{};
     std::shared_ptr<std::atomic<uint32_t>> occupied_slots;
     std::atomic<uint32_t> state{IBRH_JOB_QUEUED};
     std::atomic<bool> cancel_requested{false};
     std::mutex gpu_mutex;
+    std::weak_ptr<ZoeGpuWorker> gpu_worker;
 #endif
     uint64_t source_frame_id = 0u;
     uint64_t timestamp_ns = 0u;
     uint32_t width = 0u;
     uint32_t height = 0u;
     std::vector<uint8_t> depth;
+    ~ibrh_job();
 };
 
 
@@ -214,34 +213,129 @@ void retain_job(ibrh_job* job) {
 
 void release_job(ibrh_job* job) {
     if (job != nullptr && job->references.fetch_sub(1u) == 1u) {
-#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
         if(job->occupied_slots)job->occupied_slots->fetch_sub(1u);
 #endif
         delete job;
     }
 }
 
-#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
-void metal_worker_loop(ibrh_model* model){
-    for(;;){ibrh_job*job=nullptr;{
-        std::unique_lock<std::mutex>lock(model->queue_mutex);
-        model->queue_condition.wait(lock,[&]{return model->stopping||
-            !model->queue.empty();});
-        if(model->stopping&&model->queue.empty())return;
-        job=model->queue.front();model->queue.pop_front();}
-        if(job->cancel_requested.load()){job->state.store(IBRH_JOB_CANCELLED);
-            release_job(job);continue;}
-        try{auto native=model->external_gpu->submit_texture(job->gpu_request);
-            {std::lock_guard<std::mutex>lock(job->gpu_mutex);
-             job->gpu_job=std::move(native);}
-            job->state.store(job->cancel_requested.load()?IBRH_JOB_CANCELLED:
-                IBRH_JOB_RUNNING);
-            if(job->cancel_requested.load())job->gpu_job->cancel();
-        }catch(...){job->state.store(IBRH_JOB_FAILED);}
-        release_job(job);
+} // namespace
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
+class ZoeGpuWorker {
+public:
+    explicit ZoeGpuWorker(ibrh_model* model)
+        : model_(model), thread_([this] { run(); }) {}
+    ~ZoeGpuWorker() { stop(); }
+
+    void enqueue(ibrh_job* job) {
+        retain_job(job);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) {
+                release_job(job);
+                throw std::runtime_error("ZoeDepth GPU worker is stopping");
+            }
+            queue_.push_back(job);
+        }
+        condition_.notify_one();
     }
-}
+
+    void retire(std::shared_ptr<zoe_native::ExternalJob> job) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!exited_) retired_.push_back(std::move(job));
+        }
+        condition_.notify_one();
+    }
+    bool cancel_queued(ibrh_job* job) {
+        bool removed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto found = std::find(queue_.begin(), queue_.end(), job);
+            if (found != queue_.end()) {
+                queue_.erase(found);
+                removed = true;
+            }
+        }
+        if (removed) {
+            job->cancel_requested.store(true);
+            job->state.store(IBRH_JOB_CANCELLED);
+            release_job(job);
+        }
+        return removed;
+    }
+
+    void stop() {
+        std::deque<ibrh_job*> dropped;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) return;
+            stopping_ = true;
+            dropped.swap(queue_);
+        }
+        for (ibrh_job* job : dropped) {
+            job->cancel_requested.store(true);
+            job->state.store(IBRH_JOB_CANCELLED);
+            release_job(job);
+        }
+        condition_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+
+private:
+    void run() {
+        for (;;) {
+            ibrh_job* job = nullptr;
+            std::deque<std::shared_ptr<zoe_native::ExternalJob>> retired;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [&] { return stopping_ || !queue_.empty() || !retired_.empty(); });
+                if (stopping_ && queue_.empty() && retired_.empty()) { exited_ = true; return; }
+                retired.swap(retired_);
+                if (!queue_.empty()) { job = queue_.front(); queue_.pop_front(); }
+            }
+            retired.clear();
+            if (!job) continue;
+            if (job->cancel_requested.load()) {
+                job->state.store(IBRH_JOB_CANCELLED);
+                release_job(job);
+                continue;
+            }
+            job->state.store(IBRH_JOB_RUNNING);
+            try {
+                auto native = model_->external_gpu->submit_texture(job->gpu_request);
+                {
+                    std::lock_guard<std::mutex> lock(job->gpu_mutex);
+                    job->gpu_job = std::move(native);
+                }
+            } catch (...) {
+                job->state.store(IBRH_JOB_FAILED);
+            }
+            release_job(job);
+        }
+    }
+
+    ibrh_model* model_ = nullptr;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<ibrh_job*> queue_;
+    std::deque<std::shared_ptr<zoe_native::ExternalJob>> retired_;
+    bool exited_ = false;
+    bool stopping_ = false;
+    std::thread thread_;
+};
 #endif
+ibrh_job::~ibrh_job() {
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
+    if (gpu_job) {
+        if (auto worker = gpu_worker.lock()) worker->retire(std::move(gpu_job));
+        else gpu_job.reset();
+    }
+#endif
+}
+namespace {
+
 
 ibrh_result IBRH_CALL query_capabilities(
     size_t capabilities_size, ibrh_capabilities* capabilities) {
@@ -407,25 +501,31 @@ ibrh_result IBRH_CALL model_load(
                 try{model->external_gpu=
                     zoe_native::create_metal_external_gpu(
                         model->context, runtime->cache_path);
-                model->worker=std::thread(metal_worker_loop,model);
+                model->gpu_worker=std::make_shared<ZoeGpuWorker>(model);
             }catch(const std::exception&error){zoedepth_destroy(model->context);
                 delete model;return fail(runtime,
                     IBRH_ERROR_UNSUPPORTED_CAPABILITY,error.what());}
         }
 #endif
     }
+#if defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32)
+    try {
+        if (model->external_gpu) model->gpu_worker = std::make_shared<ZoeGpuWorker>(model);
+    } catch (const std::exception& error) {
+        zoedepth_destroy(model->context);
+        delete model;
+        return fail(runtime, IBRH_ERROR_INTERNAL, error.what());
+    }
+#endif
     *output = model;
     return IBRH_OK;
 }
 
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
-#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
-    {std::lock_guard<std::mutex>lock(model->queue_mutex);model->stopping=true;
-     for(ibrh_job*job:model->queue){job->cancel_requested.store(true);
-        job->state.store(IBRH_JOB_CANCELLED);release_job(job);}model->queue.clear();}
-    model->queue_condition.notify_all();
-    if(model->worker.joinable())model->worker.join();
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
+    if (model->gpu_worker) model->gpu_worker->stop();
+    model->gpu_worker.reset();
 #endif
 #if defined(ZOEDEPTH_WITH_VULKAN) || defined(ZOEDEPTH_WITH_METAL)
     model->external_gpu.reset();
@@ -507,9 +607,11 @@ ibrh_result IBRH_CALL submit(ibrh_model* model, size_t request_size,
            target.synchronization.operation!=IBRH_SYNC_SIGNAL)
             return IBRH_ERROR_UNSUPPORTED_CAPABILITY;
         auto* job=new(std::nothrow)ibrh_job(); if(!job)return IBRH_ERROR_INTERNAL;
-        try{
-            std::lock_guard<std::mutex> lock(model->submit_mutex);
-            job->gpu_job=model->external_gpu->submit_texture({
+        uint32_t occupied=model->occupied_slots->load();
+        while(occupied<5u&&!model->occupied_slots->compare_exchange_weak(occupied,occupied+1u)){}
+        if(occupied>=5u){delete job;return IBRH_ERROR_INVALID_STATE;}
+        job->occupied_slots=model->occupied_slots;
+        job->gpu_request={
                 static_cast<uintptr_t>(input.native_handle),input.auxiliary_handle,
                 input.width,input.height,
                 input.pixel_format==IBRH_PIXEL_RGBA8,network_size,
@@ -519,9 +621,12 @@ ibrh_result IBRH_CALL submit(ibrh_model* model, size_t request_size,
                 destination.auxiliary_handle,destination.width,destination.height,
                 static_cast<uintptr_t>(target.synchronization.native_handle),
                 target.synchronization.value,
-                request->source_frame_id,request->timestamp_ns});
-        }catch(const std::invalid_argument& e){delete job;return fail(model->runtime,IBRH_ERROR_INVALID_ARGUMENT,e.what());
-        }catch(const std::exception& e){delete job;return fail(model->runtime,IBRH_ERROR_UNSUPPORTED_CAPABILITY,e.what());}
+                request->source_frame_id,request->timestamp_ns};
+        job->source_frame_id=request->source_frame_id;job->timestamp_ns=request->timestamp_ns;
+        job->width=input.width;job->height=input.height;
+        job->gpu_worker=model->gpu_worker;
+        try { model->gpu_worker->enqueue(job); }
+        catch (...) { release_job(job); return IBRH_ERROR_INVALID_STATE; }
         job->source_frame_id=request->source_frame_id;job->timestamp_ns=request->timestamp_ns;
         job->width=input.width;job->height=input.height;*output=job;return IBRH_OK;
     }
@@ -562,10 +667,10 @@ ibrh_result IBRH_CALL submit(ibrh_model* model, size_t request_size,
             destination.auxiliary_handle,destination.width,destination.height,
             static_cast<uintptr_t>(signal.native_handle),signal.value,
             request->source_frame_id,request->timestamp_ns};
-        {std::lock_guard<std::mutex>lock(model->queue_mutex);
-         if(model->stopping){release_job(job);return IBRH_ERROR_INVALID_STATE;}
-         retain_job(job);model->queue.push_back(job);}
-        model->queue_condition.notify_one();*output=job;return IBRH_OK;
+        job->gpu_worker=model->gpu_worker;
+        try { model->gpu_worker->enqueue(job); }
+        catch (...) { release_job(job); return IBRH_ERROR_INVALID_STATE; }
+        *output=job;return IBRH_OK;
     }
 #endif
     if(input.domain!=IBRH_RESOURCE_DOMAIN_HOST||destination.domain!=IBRH_RESOURCE_DOMAIN_HOST||
@@ -588,7 +693,7 @@ ibrh_result IBRH_CALL submit(ibrh_model* model, size_t request_size,
     if(status!=ZOEDEPTH_STATUS_OK)
         return fail(model->runtime,status_result(status),zoedepth_last_error());
     auto* job=new(std::nothrow)ibrh_job();if(!job)return IBRH_ERROR_INTERNAL;
-#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
     job->state.store(IBRH_JOB_COMPLETE);
 #endif
     job->source_frame_id=request->source_frame_id;job->timestamp_ns=request->timestamp_ns;
@@ -602,7 +707,7 @@ ibrh_result IBRH_CALL job_poll(
     if (status_size < sizeof(*status)) return IBRH_ERROR_STRUCT_TOO_SMALL;
     *status = {};
     status->struct_size = sizeof(*status);
-#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
     std::shared_ptr<zoe_native::ExternalJob> native_job;
     {std::lock_guard<std::mutex>lock(
         const_cast<ibrh_job*>(job)->gpu_mutex);native_job=job->gpu_job;}
@@ -637,7 +742,7 @@ ibrh_result IBRH_CALL job_poll(
 
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (job == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
-#if defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)
+#if (defined(ZOEDEPTH_WITH_METAL) && defined(__APPLE__)) || (defined(ZOEDEPTH_WITH_VULKAN) && defined(_WIN32))
     job->cancel_requested.store(true);
     std::shared_ptr<zoe_native::ExternalJob> native_job;
     {std::lock_guard<std::mutex>lock(job->gpu_mutex);native_job=job->gpu_job;}
